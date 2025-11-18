@@ -196,21 +196,21 @@ object KeyBoxUtils {
             val xmlData = filePath.readText()
             val xmlParser = XmlParser(xmlData.sanitizeXml())
 
-            val numberOfKeyboxesResult = xmlParser.obtainPath("AndroidAttestation.NumberOfKeyboxes")
-            val numberOfKeyboxes =
-                when (numberOfKeyboxesResult) {
-                    is XmlParser.ParseResult.Success ->
-                        numberOfKeyboxesResult.attributes["text"]?.toIntOrNull() ?: 1
-                    is XmlParser.ParseResult.Error ->
-                        throw Exception(
-                            numberOfKeyboxesResult.message,
-                            numberOfKeyboxesResult.cause,
-                        )
+            var keyIndex = 0
+            while (true) {
+                try {
+                    val (algorithmName, keyBox) = processKeybox(xmlParser, keyIndex)
+                    keyboxes[algorithmName] = keyBox
+                    Logger.i("Successfully processed keybox index $keyIndex with algorithm $algorithmName")
+                    keyIndex++
+                } catch (e: Exception) {
+                    if (e.message?.contains("Path not found") == true) {
+                        Logger.i("Finished processing all keyboxes. Found $keyIndex keys.")
+                    } else {
+                        Logger.e("Error processing keybox at index ${keyIndex-1}", e)
+                    }
+                    break
                 }
-
-            repeat(numberOfKeyboxes) { i ->
-                val (algorithmName, keyBox) = processKeybox(xmlParser, i)
-                keyboxes[algorithmName] = keyBox
             }
 
             Logger.i("Successfully loaded ${keyboxes.size} keyboxes from $fileName")

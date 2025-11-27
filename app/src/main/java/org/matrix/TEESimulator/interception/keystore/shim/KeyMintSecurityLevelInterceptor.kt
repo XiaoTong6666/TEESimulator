@@ -218,6 +218,15 @@ class KeyMintSecurityLevelInterceptor(
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
         }
+
+        // Clears all cached keys.
+        fun clearAllGeneratedKeys(reason: String? = null) {
+            val count = generatedKeys.size
+            val reasonMessage = reason?.let { " due to $it" } ?: ""
+            generatedKeys.clear()
+            attestationKeys.clear()
+            SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
+        }
     }
 }
 

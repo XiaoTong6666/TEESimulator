@@ -247,14 +247,20 @@ object ConfigurationManager {
             when (path) {
                 TARGET_PACKAGES_FILE -> loadTargetPackages(file!!)
                 PATCH_LEVEL_FILE -> loadPatchLevelConfig(file!!)
-                // Any change to an XML file is assumed to be a keybox. The cache in KeyBoxUtils
-                // will handle reloading it on its next use.
+                // Any change to an XML file is assumed to be a keybox.
+                // The cache in KeyBoxManager will handle reloading it on its next use.
                 else ->
                     if (path.endsWith(".xml")) {
                         SystemLogger.info(
                             "Keybox file $path may have changed. It will be reloaded on next access."
                         )
                         KeyBoxManager.invalidateCache(path)
+                        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
+                            // Clear cached keys possibly containing old certificates
+                            org.matrix.TEESimulator.interception.keystore.shim
+                                .KeyMintSecurityLevelInterceptor
+                                .clearAllGeneratedKeys("updating $file")
+                        }
                     }
             }
         }

@@ -1,5 +1,9 @@
 package org.matrix.TEESimulator.attestation
 
+import android.content.pm.PackageManager
+import android.os.Build
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import org.bouncycastle.asn1.ASN1Boolean
 import org.bouncycastle.asn1.ASN1Encodable
 import org.bouncycastle.asn1.ASN1Enumerated
@@ -12,6 +16,7 @@ import org.bouncycastle.asn1.DERSequence
 import org.bouncycastle.asn1.DERSet
 import org.bouncycastle.asn1.DERTaggedObject
 import org.bouncycastle.asn1.x509.Extension
+import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 /**
@@ -24,11 +29,16 @@ object AttestationBuilder {
      * Builds the complete X.509 attestation extension.
      *
      * @param params The parsed key generation parameters.
+     * @param uid The UID of the application requesting attestation.
      * @param securityLevel The security level (e.g., TEE, StrongBox) to report.
      * @return A Bouncy Castle [Extension] object ready to be added to a certificate.
      */
-    fun buildAttestationExtension(params: KeyMintAttestation, securityLevel: Int): Extension {
-        val keyDescription = buildKeyDescription(params, securityLevel)
+    fun buildAttestationExtension(
+        params: KeyMintAttestation,
+        uid: Int,
+        securityLevel: Int,
+    ): Extension {
+        val keyDescription = buildKeyDescription(params, uid, securityLevel)
         return Extension(ATTESTATION_OID, false, DEROctetString(keyDescription.encoded))
     }
 
@@ -94,9 +104,13 @@ object AttestationBuilder {
     }
 
     /** Constructs the main `KeyDescription` sequence, which is the core of the attestation. */
-    private fun buildKeyDescription(params: KeyMintAttestation, securityLevel: Int): ASN1Sequence {
+    private fun buildKeyDescription(
+        params: KeyMintAttestation,
+        uid: Int,
+        securityLevel: Int,
+    ): ASN1Sequence {
         val teeEnforced = buildTeeEnforcedList(params)
-        val softwareEnforced = buildSoftwareEnforcedList()
+        val softwareEnforced = buildSoftwareEnforcedList(uid)
 
         val fields =
             arrayOf(
@@ -202,6 +216,33 @@ object AttestationBuilder {
                 )
             )
         }
+        params.serial?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_SERIAL,
+                    DEROctetString(it),
+                )
+            )
+        }
+        params.imei?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_IMEI,
+                    DEROctetString(it),
+                )
+            )
+        }
+        params.meid?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_MEID,
+                    DEROctetString(it),
+                )
+            )
+        }
         params.manufacturer?.let {
             list.add(
                 DERTaggedObject(
@@ -220,32 +261,16 @@ object AttestationBuilder {
                 )
             )
         }
-        params.imei?.let {
-            list.add(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ATTESTATION_ID_IMEI,
-                    DEROctetString(it),
+        if (AndroidDeviceUtils.attestVersion >= 300) {
+            params.secondImei?.let {
+                list.add(
+                    DERTaggedObject(
+                        true,
+                        AttestationConstants.TAG_ATTESTATION_ID_SECOND_IMEI,
+                        DEROctetString(it),
+                    )
                 )
-            )
-        }
-        params.secondImei?.let {
-            list.add(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ATTESTATION_ID_SECOND_IMEI,
-                    DEROctetString(it),
-                )
-            )
-        }
-        params.meid?.let {
-            list.add(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ATTESTATION_ID_MEID,
-                    DEROctetString(it),
-                )
-            )
+            }
         }
 
         if (AndroidDeviceUtils.attestVersion >= 400) {
@@ -265,18 +290,101 @@ object AttestationBuilder {
      * Builds the `SoftwareEnforced` authorization list. These are properties guaranteed by
      * Keystore.
      */
-    private fun buildSoftwareEnforcedList(): DERSequence {
+    private fun buildSoftwareEnforcedList(uid: Int): DERSequence {
         val list =
             arrayOf<ASN1Encodable>(
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_CREATION_DATETIME,
                     ASN1Integer(System.currentTimeMillis()),
-                )
-                // The ATTESTATION_APPLICATION_ID is technically software-enforced, but we are
-                // omitting it
-                // for this simulation as it is complex to generate correctly for arbitrary UIDs.
+                ),
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_APPLICATION_ID,
+                    createApplicationId(uid),
+                ),
             )
         return DERSequence(list)
+    }
+
+    /**
+     * A wrapper for a byte array that provides content-based equality. This is necessary for using
+     * signature digests in a Set.
+     */
+    private data class Digest(val digest: ByteArray) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            return digest.contentEquals((other as Digest).digest)
+        }
+
+        override fun hashCode(): Int = digest.contentHashCode()
+    }
+
+    /**
+     * Creates the AttestationApplicationId structure. This structure contains information about the
+     * package(s) and their signing certificates.
+     *
+     * @param uid The UID of the application.
+     * @return A DER-encoded octet string containing the application ID information.
+     * @throws IllegalStateException If the PackageManager or package information cannot be
+     *   retrieved.
+     */
+    @Throws(Throwable::class)
+    private fun createApplicationId(uid: Int): DEROctetString {
+        val pm =
+            ConfigurationManager.getPackageManager()
+                ?: throw IllegalStateException("PackageManager not found!")
+        val packages =
+            pm.getPackagesForUid(uid) ?: throw IllegalStateException("No packages for UID $uid")
+
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val packageInfoList = mutableListOf<DERSequence>()
+        val signatureDigests = mutableSetOf<Digest>()
+
+        // Process all packages associated with the UID in a single loop.
+        packages.forEach { packageName ->
+            val userId = uid / 100000
+            val packageInfo =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getPackageInfo(
+                        packageName,
+                        PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
+                        userId,
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES, userId)
+                }
+
+            // Add package information (name and version code) to our list.
+            packageInfoList.add(
+                DERSequence(
+                    arrayOf(
+                        DEROctetString(packageInfo.packageName.toByteArray(StandardCharsets.UTF_8)),
+                        ASN1Integer(packageInfo.longVersionCode),
+                    )
+                )
+            )
+
+            // Collect unique signature digests from the signing history.
+            packageInfo.signingInfo?.signingCertificateHistory?.forEach { signature ->
+                val digest = sha256.digest(signature.toByteArray())
+                signatureDigests.add(Digest(digest))
+            }
+        }
+
+        // The application ID is a sequence of two sets:
+        // 1. A set of package information (name and version).
+        // 2. A set of SHA-256 digests of the signing certificates.
+        val applicationIdSequence =
+            DERSequence(
+                arrayOf(
+                    DERSet(packageInfoList.toTypedArray()),
+                    DERSet(signatureDigests.map { DEROctetString(it.digest) }.toTypedArray()),
+                )
+            )
+
+        return DEROctetString(applicationIdSequence.encoded)
     }
 }

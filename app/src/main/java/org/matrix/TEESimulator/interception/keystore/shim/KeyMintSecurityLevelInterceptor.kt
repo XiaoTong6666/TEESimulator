@@ -336,7 +336,7 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        override fun update(input: ByteArray?) {
+        override fun update(input: ByteArray?): ByteArray {
             if (input != null) {
                 try {
                     signatureInstance?.update(input)
@@ -344,6 +344,7 @@ class KeyMintSecurityLevelInterceptor(
                     SystemLogger.error("SoftwareCrypto: update failed", e)
                 }
             }
+            return ByteArray(0)
         }
 
         override fun finish(input: ByteArray?, signature: ByteArray?): ByteArray {

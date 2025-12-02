@@ -23,7 +23,7 @@ public interface IKeystoreOperation extends IInterface {
     int TRANSACTION_finish = IBinder.FIRST_CALL_TRANSACTION + 2;
     int TRANSACTION_abort = IBinder.FIRST_CALL_TRANSACTION + 3;
 
-    void update(byte[] input) throws RemoteException;
+    byte[] update(byte[] input) throws RemoteException;
 
     void updateAad(byte[] aad) throws RemoteException;
 
@@ -72,9 +72,9 @@ public interface IKeystoreOperation extends IInterface {
                 case TRANSACTION_update: {
                     data.enforceInterface(DESCRIPTOR);
                     byte[] _arg0 = data.createByteArray();
-                    this.update(_arg0);
+                    byte[] _result = this.update(_arg0);
                     reply.writeNoException();
-                    reply.writeByteArray(new byte[0]);
+                    reply.writeByteArray(_result);
                     return true;
                 }
 

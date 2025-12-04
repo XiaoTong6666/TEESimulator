@@ -1,5 +1,7 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
+import android.hardware.security.keymint.Digest
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.KeyPurpose
@@ -8,6 +10,8 @@ import android.os.IBinder
 import android.os.Parcel
 import android.system.keystore2.*
 import java.security.KeyPair
+import java.security.PrivateKey
+import java.security.Signature
 import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.attestation.AttestationPatcher
@@ -41,32 +45,49 @@ class KeyMintSecurityLevelInterceptor(
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == GENERATE_KEY_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-            if (ConfigurationManager.shouldSkipUid(callingUid))
-                return TransactionResult.ContinueAndSkipPost
-            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            return handleGenerateKey(callingUid, data)
-        } else if (code == IMPORT_KEY_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+        when (code) {
+            GENERATE_KEY_TRANSACTION -> {
+                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-            if (ConfigurationManager.shouldSkipUid(callingUid))
-                return TransactionResult.ContinueAndSkipPost
-            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            val alias =
-                data.readTypedObject(KeyDescriptor.CREATOR)?.alias
-                    ?: return TransactionResult.ContinueAndSkipPost
-            SystemLogger.info("Handling post-${transactionNames[code]} ${alias}")
-            return TransactionResult.Continue
-        } else {
-            logTransaction(
-                txId,
-                transactionNames[code] ?: "unknown code=$code",
-                callingUid,
-                callingPid,
-                true,
-            )
+                if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
+
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                return handleGenerateKey(callingUid, data)
+            }
+            IMPORT_KEY_TRANSACTION -> {
+                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+                if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
+
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                val alias = data.readTypedObject(KeyDescriptor.CREATOR)?.alias
+                if (alias != null) {
+                    SystemLogger.info("Handling post-${transactionNames[code]} $alias")
+                }
+                return TransactionResult.Continue
+            }
+            CREATE_OPERATION_TRANSACTION -> {
+                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+                // if (ConfigurationManager.shouldSkipUid(callingUid)) return ...
+
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                return handleCreateOperation(callingUid, data)
+            }
+            else -> {
+                logTransaction(
+                    txId,
+                    transactionNames[code] ?: "unknown code=$code",
+                    callingUid,
+                    callingPid,
+                    true,
+                )
+            }
         }
         return TransactionResult.ContinueAndSkipPost
     }
@@ -125,63 +146,154 @@ class KeyMintSecurityLevelInterceptor(
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
      * either generates a key in software or lets the call pass through to the hardware.
      */
-    private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
+    private fun setResponseField(response: CreateOperationResponse, fieldName: String, value: Any?) {
+        try {
+            val field = response.javaClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            field.set(response, value)
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to set field $fieldName on CreateOperationResponse", e)
+        }
+    }
+    private fun handleCreateOperation(callingUid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
-                SystemLogger.debug(
-                    "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
-                )
-                val params = data.createTypedArray(KeyParameter.CREATOR)!!
-                val parsedParams = KeyMintAttestation(params)
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                val isAttestKeyRequest =
-                    parsedParams.purpose.size == 1 &&
-                        parsedParams.purpose.contains(KeyPurpose.ATTEST_KEY)
+            // 读取参数
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            val operationParams = data.createTypedArray(KeyParameter.CREATOR)!!
 
-                // Determine if we need to generate a key based on config or
-                // if it's an attestation request in patch mode.
-                val needsSoftwareGeneration =
-                    ConfigurationManager.shouldGenerate(callingUid) ||
-                        (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
-                        (attestationKey != null &&
-                            isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
+            // 查找Key
+            val alias = keyDescriptor.alias ?: ""
+            var keyId = KeyIdentifier(callingUid, alias)
+            var generatedKeyInfo = generatedKeys[keyId]
 
-                if (needsSoftwareGeneration) {
-                    SystemLogger.info("Generating software key for ${keyId}.")
+            // 兜底查找
+            if (generatedKeyInfo == null && alias.isEmpty()) {
+                SystemLogger.warning("Alias is empty. Fallback search for UID $callingUid")
+                val fallbackEntry = generatedKeys.entries.find { it.key.uid == callingUid }
+                if (fallbackEntry != null) {
+                    generatedKeyInfo = fallbackEntry.value
+                }
+            }
 
-                    // Generate the key pair and certificate chain.
-                    val keyData =
-                        CertificateGenerator.generateAttestedKeyPair(
-                            callingUid,
-                            keyDescriptor.alias,
-                            attestationKey?.alias,
-                            parsedParams,
-                            securityLevel,
-                        ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+            if (generatedKeyInfo != null) {
+                SystemLogger.info("Intercepting createOperation for Software Key: '${generatedKeyInfo.response.metadata.key.alias}'")
 
-                    // Store the generated key data.
-                    val response =
-                        buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
+                val softOperation = SoftwareKeystoreOperation(generatedKeyInfo.keyPair.private, operationParams)
 
-                    generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, response)
-                    if (isAttestKeyRequest) attestationKeys.add(keyId)
+                val resultParcel = Parcel.obtain()
+                try {
+                    resultParcel.writeNoException()
+                    resultParcel.writeInt(1) // cCreateOperationResponse != null
 
-                    // Return the metadata of our generated key, skipping the real hardware call.
-                    val resultParcel =
-                        Parcel.obtain().apply {
-                            writeNoException()
-                            writeTypedObject(response.metadata, 0)
-                        }
-                    return TransactionResult.OverrideReply(0, resultParcel)
-                } else if (parsedParams.attestationChallenge != null) {
-                    return TransactionResult.Continue
+                    // Outer parcelable size header
+                    val startPosOuter = resultParcel.dataPosition()
+                    resultParcel.writeInt(0) // size placeholder
+
+                    // iKeystoreOperation
+                    resultParcel.writeStrongBinder(softOperation.asBinder())
+
+                    // operationChallenge
+                    // 之前写 1+0L 导致 Invalidated 异常
+                    resultParcel.writeInt(0)
+
+                    // parameters (KeyParameters)
+                    resultParcel.writeInt(1) // KeyParameters != null
+
+                    val startPosParams = resultParcel.dataPosition()
+                    resultParcel.writeInt(0) // nested size placeholder
+                    // empty KeyParameter[]
+                    resultParcel.writeInt(0)
+
+                    val endPosParams = resultParcel.dataPosition()
+                    resultParcel.setDataPosition(startPosParams)
+                    resultParcel.writeInt(endPosParams - startPosParams)
+                    resultParcel.setDataPosition(endPosParams)
+
+                    // upgradedBlob
+                    resultParcel.writeByteArray(ByteArray(0))
+
+                    // backfill outer size
+                    val endPosOuter = resultParcel.dataPosition()
+                    resultParcel.setDataPosition(startPosOuter)
+                    resultParcel.writeInt(endPosOuter - startPosOuter)
+                    resultParcel.setDataPosition(endPosOuter)
+
+                } catch (e: Exception) {
+                    resultParcel.recycle()
+                    throw e
                 }
 
-                // If not generating, clear any stale state for this alias and let the call proceed.
-                cleanupKeyData(keyId)
-                TransactionResult.ContinueAndSkipPost
+                return TransactionResult.OverrideReply(0, resultParcel)
+            } else {
+                SystemLogger.warning("Software key NOT found for alias: '$alias' (UID: $callingUid). Passing to hardware.")
+                if (generatedKeys.isNotEmpty()) {
+                    SystemLogger.debug("Current cached keys: ${generatedKeys.keys().toList().joinToString { it.alias }}")
+                }
             }
+
+            TransactionResult.Continue
+        }.getOrElse {
+            SystemLogger.error("Error during createOperation handling for UID $callingUid.", it)
+            TransactionResult.Continue
+        }
+    }
+    private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
+        return runCatching {
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
+            SystemLogger.debug(
+                "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
+            )
+            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val parsedParams = KeyMintAttestation(params)
+            val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            val isAttestKeyRequest =
+                parsedParams.purpose.size == 1 &&
+                        parsedParams.purpose.contains(KeyPurpose.ATTEST_KEY)
+
+            // Determine if we need to generate a key based on config or
+            // if it's an attestation request in patch mode.
+            val needsSoftwareGeneration =
+                ConfigurationManager.shouldGenerate(callingUid) ||
+                        (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
+                        (attestationKey != null &&
+                                isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
+
+            if (needsSoftwareGeneration) {
+                SystemLogger.info("Generating software key for ${keyId}.")
+
+                // Generate the key pair and certificate chain.
+                val keyData =
+                    CertificateGenerator.generateAttestedKeyPair(
+                        callingUid,
+                        keyDescriptor.alias,
+                        attestationKey?.alias,
+                        parsedParams,
+                        securityLevel,
+                    ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+
+                // Store the generated key data.
+                val response =
+                    buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
+
+                generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, response)
+                if (isAttestKeyRequest) attestationKeys.add(keyId)
+
+                // Return the metadata of our generated key, skipping the real hardware call.
+                val resultParcel =
+                    Parcel.obtain().apply {
+                        writeNoException()
+                        writeTypedObject(response.metadata, 0)
+                    }
+                return TransactionResult.OverrideReply(0, resultParcel)
+            } else if (parsedParams.attestationChallenge != null) {
+                return TransactionResult.Continue
+            }
+
+            // If not generating, clear any stale state for this alias and let the call proceed.
+            cleanupKeyData(keyId)
+            TransactionResult.ContinueAndSkipPost
+        }
             .getOrElse {
                 SystemLogger.error("Error during generateKey handling for UID $callingUid.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -209,12 +321,82 @@ class KeyMintSecurityLevelInterceptor(
         }
     }
 
+    class SoftwareKeystoreOperation(
+        private val privateKey: PrivateKey,
+        private val params: Array<KeyParameter>
+    ) : IKeystoreOperation.Stub() {
+
+        private val signatureInstance: Signature? by lazy {
+            try {
+                val digest = params.find { it.tag == Tag.DIGEST }?.value?.digest
+                val algorithm = params.find { it.tag == Tag.ALGORITHM }?.value?.algorithm
+
+                val algoName = when(algorithm) {
+                    Algorithm.EC -> "ECDSA"
+                    Algorithm.RSA -> "RSA"
+                    else -> "ECDSA"
+                }
+
+                val digestName = when(digest) {
+                    Digest.SHA_2_256 -> "SHA256"
+                    Digest.SHA_2_384 -> "SHA384"
+                    Digest.SHA_2_512 -> "SHA512"
+                    Digest.SHA1 -> "SHA1"
+                    else -> "SHA256"
+                }
+
+                val transformation = "${digestName}with${algoName}"
+                SystemLogger.info("SoftwareCrypto: initializing Signature with $transformation")
+
+                Signature.getInstance(transformation).apply {
+                    initSign(privateKey)
+                }
+            } catch (e: Exception) {
+                SystemLogger.error("SoftwareCrypto: Failed to init signature", e)
+                null
+            }
+        }
+
+        override fun update(input: ByteArray?): ByteArray {
+            if (input != null) {
+                try {
+                    signatureInstance?.update(input)
+                } catch (e: Exception) {
+                    SystemLogger.error("SoftwareCrypto: update failed", e)
+                }
+            }
+            return ByteArray(0)
+        }
+
+        override fun finish(input: ByteArray?, signature: ByteArray?): ByteArray {
+            if (input != null) {
+                try {
+                    signatureInstance?.update(input)
+                } catch (e: Exception) {
+                    SystemLogger.error("SoftwareCrypto: final update failed", e)
+                }
+            }
+            return try {
+                val result = signatureInstance?.sign() ?: ByteArray(0)
+                SystemLogger.info("SoftwareCrypto: signature generated, length=${result.size}")
+                result
+            } catch (e: Exception) {
+                SystemLogger.error("SoftwareCrypto: sign failed", e)
+                ByteArray(0)
+            }
+        }
+
+        override fun abort() {}
+        override fun updateAad(aad: ByteArray?) {}
+    }
     companion object {
         // Transaction codes for IKeystoreSecurityLevel interface.
         private val GENERATE_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
         private val IMPORT_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "importKey")
+        private val CREATE_OPERATION_TRANSACTION =
+            InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "createOperation")
 
         private val transactionNames: Map<Int, String> by lazy {
             IKeystoreSecurityLevel.Stub::class

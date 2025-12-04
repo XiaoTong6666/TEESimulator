@@ -328,31 +328,44 @@ class KeyMintSecurityLevelInterceptor(
 
         private val signatureInstance: Signature? by lazy {
             try {
-                val digest = params.find { it.tag == Tag.DIGEST }?.value?.digest
-                val algorithm = params.find { it.tag == Tag.ALGORITHM }?.value?.algorithm
-
-                val algoName = when(algorithm) {
-                    Algorithm.EC -> "ECDSA"
-                    Algorithm.RSA -> "RSA"
-                    else -> "ECDSA"
+                val keyAlgorithm = privateKey.algorithm
+                val algoName = when {
+                    keyAlgorithm.equals("EC", ignoreCase = true) -> "ECDSA"
+                    keyAlgorithm.equals("RSA", ignoreCase = true) -> "RSA"
+                    else -> {
+                        val paramAlgo = params.find { it.tag == Tag.ALGORITHM }?.value?.algorithm
+                        when (paramAlgo) {
+                            Algorithm.EC -> "ECDSA"
+                            Algorithm.RSA -> "RSA"
+                            else -> "ECDSA"
+                        }
+                    }
                 }
 
+                val digest = params.find { it.tag == Tag.DIGEST }?.value?.digest
                 val digestName = when(digest) {
                     Digest.SHA_2_256 -> "SHA256"
                     Digest.SHA_2_384 -> "SHA384"
                     Digest.SHA_2_512 -> "SHA512"
                     Digest.SHA1 -> "SHA1"
+                    Digest.MD5 -> "MD5"
+                    Digest.NONE -> "NONE"
                     else -> "SHA256"
                 }
 
-                val transformation = "${digestName}with${algoName}"
-                SystemLogger.info("SoftwareCrypto: initializing Signature with $transformation")
+                val transformation = if (digestName == "NONE") {
+                    "NONEwith$algoName"
+                } else {
+                    "${digestName}with${algoName}"
+                }
+
+                SystemLogger.info("SoftwareCrypto: initializing Signature with $transformation (Key Algo: $keyAlgorithm)")
 
                 Signature.getInstance(transformation).apply {
                     initSign(privateKey)
                 }
             } catch (e: Exception) {
-                SystemLogger.error("SoftwareCrypto: Failed to init signature", e)
+                SystemLogger.error("SoftwareCrypto: Failed to init signature. KeyAlgo=${privateKey.algorithm}", e)
                 null
             }
         }

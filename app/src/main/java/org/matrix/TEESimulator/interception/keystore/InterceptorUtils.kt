@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.keystore
 import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
+import android.security.keystore.KeystoreResponse
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -24,6 +25,19 @@ object InterceptorUtils {
                 e,
             )
             -1 // Return an invalid code
+        }
+    }
+
+    /** Creates an `KeystoreResponse` parcel that indicates success with no data. */
+    fun createSuccessKeystoreResponse(): KeystoreResponse {
+        val parcel = Parcel.obtain()
+        try {
+            parcel.writeInt(KeyStore.NO_ERROR)
+            parcel.writeString("")
+            parcel.setDataPosition(0)
+            return KeystoreResponse.CREATOR.createFromParcel(parcel)
+        } finally {
+            parcel.recycle()
         }
     }
 

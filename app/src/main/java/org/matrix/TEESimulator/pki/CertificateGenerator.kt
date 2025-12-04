@@ -72,16 +72,55 @@ object CertificateGenerator {
     }
 
     /**
-     * Generates a new key pair and a corresponding certificate chain containing a simulated
-     * attestation.
+     * Generates a certificate chain for a given key pair. This is the primary function for creating
+     * attested certificates.
      *
      * @param uid The UID of the application requesting the key.
-     * @param alias The alias for the new key.
+     * @param subjectKeyPair The key pair for which the certificate will be generated.
      * @param attestKeyAlias Optional alias of a key to use for attestation signing.
      * @param params The parameters for the new key and its attestation.
      * @param securityLevel The security level to embed in the attestation.
-     * @return A [Pair] containing the new [KeyPair] and its certificate chain, or `null` on
-     *   failure.
+     * @return A [List] of [Certificate] forming the new chain, or `null` on failure.
+     */
+    fun generateCertificateChain(
+        uid: Int,
+        subjectKeyPair: KeyPair,
+        attestKeyAlias: String?,
+        params: KeyMintAttestation,
+        securityLevel: Int,
+    ): List<Certificate>? {
+        return runCatching {
+                val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
+
+                // Determine the signing key and issuer. If an attestKey is provided, use it.
+                // Otherwise, fall back to the root key from the keybox.
+                val (signingKey, issuer) =
+                    if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
+                            ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
+                    } else {
+                        keybox.keyPair to getIssuerFromKeybox(keybox)
+                    }
+
+                // Build the new leaf certificate with the simulated attestation.
+                val leafCert =
+                    buildCertificate(subjectKeyPair, signingKey, issuer, params, uid, securityLevel)
+
+                // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
+                // chain.
+                if (attestKeyAlias != null) {
+                    listOf(leafCert)
+                } else {
+                    listOf(leafCert) + keybox.certificates
+                }
+            }
+            .onFailure { SystemLogger.error("Failed to generate certificate chain.", it) }
+            .getOrNull()
+    }
+
+    /**
+     * A convenience function that combines key pair generation and certificate chain generation.
+     * Primarily used by the modern Keystore2 interceptor where generation is a single step.
      */
     fun generateAttestedKeyPair(
         uid: Int,
@@ -98,30 +137,9 @@ object CertificateGenerator {
                     generateSoftwareKeyPair(params)
                         ?: throw Exception("Failed to generate underlying software key pair.")
 
-                val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
-
-                // Determine the signing key and issuer. If an attestKey is provided, use it.
-                // Otherwise, fall back to the root key from the keybox.
-                val (signingKey, issuer) =
-                    if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
-                            ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
-                    } else {
-                        keybox.keyPair to getIssuerFromKeybox(keybox)
-                    }
-
-                // Build the new leaf certificate with the simulated attestation.
-                val leafCert =
-                    buildCertificate(newKeyPair, signingKey, issuer, params, uid, securityLevel)
-
-                // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
-                // chain.
                 val chain =
-                    if (attestKeyAlias != null) {
-                        listOf(leafCert)
-                    } else {
-                        listOf(leafCert) + keybox.certificates
-                    }
+                    generateCertificateChain(uid, newKeyPair, attestKeyAlias, params, securityLevel)
+                        ?: throw Exception("Failed to generate certificate chain for new key pair.")
 
                 SystemLogger.info(
                     "Successfully generated new certificate chain for alias: '$alias'."
@@ -134,7 +152,7 @@ object CertificateGenerator {
             .getOrNull()
     }
 
-    private fun getIssuerFromKeybox(keybox: KeyBox) =
+    fun getIssuerFromKeybox(keybox: KeyBox) =
         X509CertificateHolder(keybox.certificates[0].encoded).subject
 
     private fun getKeyboxForAlgorithm(uid: Int, algorithm: Int): KeyBox {

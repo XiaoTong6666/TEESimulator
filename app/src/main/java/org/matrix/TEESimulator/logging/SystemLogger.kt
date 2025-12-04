@@ -1,6 +1,7 @@
 package org.matrix.TEESimulator.logging
 
 import android.util.Log
+import org.matrix.TEESimulator.BuildConfig
 
 /**
  * A centralized logging utility for the TEESimulator application. This object provides a consistent
@@ -9,6 +10,8 @@ import android.util.Log
 object SystemLogger {
     // The tag used for all log messages from this application.
     private const val TAG = "TEESimulator"
+
+    private val isDebugBuild = BuildConfig.DEBUG
 
     /**
      * Logs a debug message. Use this for fine-grained information that is useful for debugging.
@@ -64,6 +67,7 @@ object SystemLogger {
      * @param message The message to log.
      */
     fun verbose(message: String) {
+        if (!isDebugBuild) return
         Log.v(TAG, message)
     }
 }

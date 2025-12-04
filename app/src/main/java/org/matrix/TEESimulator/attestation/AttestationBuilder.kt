@@ -103,14 +103,18 @@ object AttestationBuilder {
         uid: Int,
         securityLevel: Int,
     ): ASN1Sequence {
-        val teeEnforced = buildTeeEnforcedList(params)
-        val softwareEnforced = buildSoftwareEnforcedList(uid)
+        val teeEnforced = buildTeeEnforcedList(params, securityLevel)
+        val softwareEnforced = buildSoftwareEnforcedList(uid, securityLevel)
 
         val fields =
             arrayOf(
-                ASN1Integer(AndroidDeviceUtils.attestVersion.toLong()), // attestationVersion
+                ASN1Integer(
+                    AndroidDeviceUtils.getAttestVersion(securityLevel).toLong()
+                ), // attestationVersion
                 ASN1Enumerated(securityLevel), // attestationSecurityLevel
-                ASN1Integer(AndroidDeviceUtils.keymasterVersion.toLong()), // keymasterVersion
+                ASN1Integer(
+                    AndroidDeviceUtils.getKeymasterVersion(securityLevel).toLong()
+                ), // keymasterVersion
                 ASN1Enumerated(securityLevel), // keymasterSecurityLevel
                 DEROctetString(params.attestationChallenge ?: ByteArray(0)), // attestationChallenge
                 DEROctetString(ByteArray(0)), // uniqueId
@@ -121,7 +125,7 @@ object AttestationBuilder {
     }
 
     /** Builds the `TeeEnforced` authorization list. These are properties the TEE "guarantees". */
-    private fun buildTeeEnforcedList(params: KeyMintAttestation): DERSequence {
+    private fun buildTeeEnforcedList(params: KeyMintAttestation, securityLevel: Int): DERSequence {
         val list =
             mutableListOf<ASN1Encodable>(
                 DERTaggedObject(
@@ -255,7 +259,7 @@ object AttestationBuilder {
                 )
             )
         }
-        if (AndroidDeviceUtils.attestVersion >= 300) {
+        if (AndroidDeviceUtils.getAttestVersion(securityLevel) >= 300) {
             params.secondImei?.let {
                 list.add(
                     DERTaggedObject(
@@ -273,7 +277,7 @@ object AttestationBuilder {
      * Builds the `SoftwareEnforced` authorization list. These are properties guaranteed by
      * Keystore.
      */
-    private fun buildSoftwareEnforcedList(uid: Int): DERSequence {
+    private fun buildSoftwareEnforcedList(uid: Int, securityLevel: Int): DERSequence {
         val list =
             mutableListOf<ASN1Encodable>(
                 DERTaggedObject(
@@ -287,7 +291,7 @@ object AttestationBuilder {
                     createApplicationId(uid),
                 ),
             )
-        if (AndroidDeviceUtils.attestVersion >= 400) {
+        if (AndroidDeviceUtils.getAttestVersion(securityLevel) >= 400) {
             list.add(
                 DERTaggedObject(
                     true,

@@ -49,11 +49,21 @@ class KeyMintSecurityLevelInterceptor(
         when (code) {
             GENERATE_KEY_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+                if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
+
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
                 return handleGenerateKey(callingUid, data)
             }
             IMPORT_KEY_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+                if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
+
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
                 val alias = data.readTypedObject(KeyDescriptor.CREATOR)?.alias
                 if (alias != null) {
@@ -63,6 +73,9 @@ class KeyMintSecurityLevelInterceptor(
             }
             CREATE_OPERATION_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+                // if (ConfigurationManager.shouldSkipUid(callingUid)) return ...
+
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
                 return handleCreateOperation(callingUid, data)
             }
@@ -72,7 +85,7 @@ class KeyMintSecurityLevelInterceptor(
                     transactionNames[code] ?: "unknown code=$code",
                     callingUid,
                     callingPid,
-                    false,
+                    true,
                 )
             }
         }
@@ -113,6 +126,14 @@ class KeyMintSecurityLevelInterceptor(
                     ?: return TransactionResult.SkipTransaction
             if (originalChain.size > 1) {
                 val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+
+                // Cache the newly patched chain to ensure consistency across subsequent API calls.
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                patchedChains[keyId] = newChain
+                SystemLogger.debug("Cached patched certificate chain for $keyId.")
+
                 CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
 
                 return InterceptorUtils.createTypedObjectReply(metadata)
@@ -162,7 +183,7 @@ class KeyMintSecurityLevelInterceptor(
                 val resultParcel = Parcel.obtain()
                 try {
                     resultParcel.writeNoException()
-                    resultParcel.writeInt(1) // cCreateOperationResponse != null
+                    resultParcel.writeInt(1) // CreateOperationResponse != null
 
                     // Outer parcelable size header
                     val startPosOuter = resultParcel.dataPosition()
@@ -218,61 +239,61 @@ class KeyMintSecurityLevelInterceptor(
     }
     private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
-                SystemLogger.debug(
-                    "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
-                )
-                val params = data.createTypedArray(KeyParameter.CREATOR)!!
-                val parsedParams = KeyMintAttestation(params)
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                val isAttestKeyRequest =
-                    parsedParams.purpose.size == 1 &&
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
+            SystemLogger.debug(
+                "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
+            )
+            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val parsedParams = KeyMintAttestation(params)
+            val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            val isAttestKeyRequest =
+                parsedParams.purpose.size == 1 &&
                         parsedParams.purpose.contains(KeyPurpose.ATTEST_KEY)
 
-                // Determine if we need to generate a key based on config or
-                // if it's an attestation request in patch mode.
-                val needsSoftwareGeneration =
-                    ConfigurationManager.shouldGenerate(callingUid) ||
+            // Determine if we need to generate a key based on config or
+            // if it's an attestation request in patch mode.
+            val needsSoftwareGeneration =
+                ConfigurationManager.shouldGenerate(callingUid) ||
                         (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
                         (attestationKey != null &&
-                            isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
+                                isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
 
-                if (needsSoftwareGeneration) {
-                    SystemLogger.info("Generating software key for ${keyId}.")
+            if (needsSoftwareGeneration) {
+                SystemLogger.info("Generating software key for ${keyId}.")
 
-                    // Generate the key pair and certificate chain.
-                    val keyData =
-                        CertificateGenerator.generateAttestedKeyPair(
-                            callingUid,
-                            keyDescriptor.alias,
-                            attestationKey?.alias,
-                            parsedParams,
-                            securityLevel,
-                        ) ?: throw Exception("CertificateGenerator failed to create key pair.")
+                // Generate the key pair and certificate chain.
+                val keyData =
+                    CertificateGenerator.generateAttestedKeyPair(
+                        callingUid,
+                        keyDescriptor.alias,
+                        attestationKey?.alias,
+                        parsedParams,
+                        securityLevel,
+                    ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
-                    // Store the generated key data.
-                    val response =
-                        buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
+                // Store the generated key data.
+                val response =
+                    buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
 
-                    generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, response)
-                    if (isAttestKeyRequest) attestationKeys.add(keyId)
+                generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, response)
+                if (isAttestKeyRequest) attestationKeys.add(keyId)
 
-                    // Return the metadata of our generated key, skipping the real hardware call.
-                    val resultParcel =
-                        Parcel.obtain().apply {
-                            writeNoException()
-                            writeTypedObject(response.metadata, 0)
-                        }
-                    return TransactionResult.OverrideReply(0, resultParcel)
-                } else if (parsedParams.attestationChallenge != null) {
-                    return TransactionResult.Continue
-                }
-
-                // If not generating, clear any stale state for this alias and let the call proceed.
-                cleanupKeyData(keyId)
-                TransactionResult.ContinueAndSkipPost
+                // Return the metadata of our generated key, skipping the real hardware call.
+                val resultParcel =
+                    Parcel.obtain().apply {
+                        writeNoException()
+                        writeTypedObject(response.metadata, 0)
+                    }
+                return TransactionResult.OverrideReply(0, resultParcel)
+            } else if (parsedParams.attestationChallenge != null) {
+                return TransactionResult.Continue
             }
+
+            // If not generating, clear any stale state for this alias and let the call proceed.
+            cleanupKeyData(keyId)
+            TransactionResult.ContinueAndSkipPost
+        }
             .getOrElse {
                 SystemLogger.error("Error during generateKey handling for UID $callingUid.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -390,6 +411,8 @@ class KeyMintSecurityLevelInterceptor(
 
         // Stores keys generated entirely in software.
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
+        // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
+        private val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
         // A set to quickly identify keys that were generated for attestation purposes.
         private val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
 
@@ -397,11 +420,16 @@ class KeyMintSecurityLevelInterceptor(
         fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
             generatedKeys[keyId]?.response
 
+        fun getPatchedChain(keyId: KeyIdentifier): Array<Certificate>? = patchedChains[keyId]
+
         fun isAttestationKey(keyId: KeyIdentifier): Boolean = attestationKeys.contains(keyId)
 
         fun cleanupKeyData(keyId: KeyIdentifier) {
             if (generatedKeys.remove(keyId) != null) {
                 SystemLogger.debug("Remove generated key ${keyId}")
+            }
+            if (patchedChains.remove(keyId) != null) {
+                SystemLogger.debug("Remove patched chain for ${keyId}")
             }
             if (attestationKeys.remove(keyId)) {
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
@@ -413,6 +441,7 @@ class KeyMintSecurityLevelInterceptor(
             val count = generatedKeys.size
             val reasonMessage = reason?.let { " due to $it" } ?: ""
             generatedKeys.clear()
+            patchedChains.clear()
             attestationKeys.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }

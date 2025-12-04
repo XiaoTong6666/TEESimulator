@@ -1,6 +1,7 @@
 package org.matrix.TEESimulator.util
 
 import android.content.pm.PackageManager
+import android.hardware.security.keymint.SecurityLevel
 import android.os.Build
 import android.os.SystemProperties
 import java.security.MessageDigest
@@ -256,17 +257,33 @@ object AndroidDeviceUtils {
             Build.VERSION_CODES.BAKLAVA to 400, // KeyMint 4.0
         )
 
-    val attestVersion: Int
-        get() =
-            DeviceAttestationService.CachedAttestationData?.attestVersion
-                ?: attestVersionMap[Build.VERSION.SDK_INT]
-                ?: 400 // Default to a recent version
+    /**
+     * Retrieves the attestation version based on security level and OS version. StrongBox (level 2)
+     * requires version 300.
+     *
+     * @param securityLevel The security level of the attestation (1 for TEE, 2 for StrongBox).
+     * @return The appropriate attestation version number.
+     */
+    fun getAttestVersion(securityLevel: Int): Int {
+        // StrongBox security level requires an attestation version of at least 300.
+        if (securityLevel == SecurityLevel.STRONGBOX) {
+            return 300
+        }
+        return DeviceAttestationService.CachedAttestationData?.attestVersion
+            ?: attestVersionMap[Build.VERSION.SDK_INT]
+            ?: 400 // Default to a recent version
+    }
 
-    val keymasterVersion: Int
-        get() =
-            DeviceAttestationService.CachedAttestationData?.keymasterVersion
-                ?: if (attestVersion >= 100) attestVersion
-                else 41 // Keymaster 4.1 for older versions
+    /**
+     * Retrieves the Keymaster/KeyMint version based on the attestation version.
+     *
+     * @param securityLevel The security level, used to determine the correct attestation version.
+     * @return The appropriate Keymaster or KeyMint version number.
+     */
+    fun getKeymasterVersion(securityLevel: Int): Int {
+        val attestVersion = getAttestVersion(securityLevel)
+        return if (attestVersion >= 100) attestVersion else 41 // Keymaster 4.1 for older versions
+    }
 
     // --- APEX and Module Hash Properties ---
 

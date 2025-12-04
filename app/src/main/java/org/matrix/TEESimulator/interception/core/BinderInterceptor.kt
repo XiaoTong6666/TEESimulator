@@ -226,13 +226,18 @@ abstract class BinderInterceptor : Binder() {
         methodName: String,
         callingUid: Int,
         callingPid: Int,
-        isIntercepting: Boolean = true,
+        skipPost: Boolean = false,
     ) {
+        val isIntercepting = !skipPost && !ConfigurationManager.shouldSkipUid(callingUid)
         val action = if (isIntercepting) "Intercept" else "Observe"
         val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
-        SystemLogger.debug(
+        val message =
             "[TX_ID: $txId] $action $methodName for packages=[$packages] (uid=$callingUid, pid=$callingPid)"
-        )
+        if (isIntercepting) {
+            SystemLogger.debug(message)
+        } else {
+            SystemLogger.verbose(message)
+        }
     }
 
     companion object {

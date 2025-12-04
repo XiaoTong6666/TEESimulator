@@ -42,11 +42,13 @@ object InterceptorUtils {
     }
 
     /** Creates an `OverrideReply` parcel that indicates success with no data. */
-    fun createSuccessReply(): BinderInterceptor.TransactionResult.OverrideReply {
+    fun createSuccessReply(writeResult: Boolean = true): BinderInterceptor.TransactionResult.OverrideReply {
         val parcel =
             Parcel.obtain().apply {
                 writeNoException()
-                writeInt(KeyStore.NO_ERROR)
+                if (writeResult) {
+                    writeInt(0)
+                }
             }
         return BinderInterceptor.TransactionResult.OverrideReply(0, parcel)
     }

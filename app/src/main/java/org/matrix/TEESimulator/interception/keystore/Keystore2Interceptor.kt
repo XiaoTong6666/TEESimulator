@@ -104,7 +104,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
 
             if (code == DELETE_KEY_TRANSACTION) {
-                KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                if (KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId) != null) {
+                    KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                    SystemLogger.info("[TX_ID: $txId] Intercepted deleteKey for Software Key '${descriptor.alias}'. Preventing hardware call.")
+                    return InterceptorUtils.createSuccessReply(writeResult = false)
+                }
                 return TransactionResult.ContinueAndSkipPost
             }
 

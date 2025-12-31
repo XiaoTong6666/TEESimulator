@@ -229,6 +229,19 @@ class KeyMintSecurityLevelInterceptor(
                 )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
+                // Validate the length of TAG_ATTESTATION_CHALLENGE.
+                // The Android KeyMint / KeyStore specification defines a maximum length of
+                // 128 bytes for the attestation challenge.
+                // If the provided challenge exceeds this limit, the operation must fail with
+                // ErrorCode.INVALID_INPUT_LENGTH (-21).
+                val challenge = parsedParams.attestationChallenge
+                if (challenge != null && challenge.size > 128) {
+                    SystemLogger.info(
+                        "Rejecting generateKey: attestation challenge length exceeds 128 bytes (${challenge.size})."
+                    )
+                    // Return INVALID_INPUT_LENGTH as defined by the KeyMint error codes.
+                    return InterceptorUtils.createErrorReply(-21, "Attestation challenge too large")
+                }
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 val isAttestKeyRequest =
                     parsedParams.purpose.size == 1 &&

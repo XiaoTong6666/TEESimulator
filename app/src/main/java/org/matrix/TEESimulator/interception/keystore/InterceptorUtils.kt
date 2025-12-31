@@ -96,4 +96,39 @@ object InterceptorUtils {
     fun hasException(reply: Parcel): Boolean {
         return runCatching { reply.readException() }.exceptionOrNull() != null
     }
+
+    /**
+     * Creates an `OverrideReply` containing a ServiceSpecificException encoded in a Parcel.
+     *
+     * This method is used to return KeyMint/Keymaster error codes directly through Binder, such as
+     * `ErrorCode.INVALID_INPUT_LENGTH` (-21), so that the caller observes the same exception
+     * behavior as with a real KeyMint HAL implementation.
+     *
+     * @param errorCode KeyMint error code to return (for example, -21 for INVALID_INPUT_LENGTH).
+     * @param message Optional error message associated with the error code.
+     */
+    fun createErrorReply(
+        errorCode: Int,
+        message: String?,
+    ): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel = Parcel.obtain()
+        try {
+            // Write a ServiceSpecificException into the Parcel.
+            // Parcel.EX_SERVICE_SPECIFIC is defined as -8.
+            // The layout is:
+            //   int    exceptionCode (EX_SERVICE_SPECIFIC)
+            //   int    serviceSpecificErrorCode
+            //   String errorMessage
+            parcel.writeInt(-8)
+            parcel.writeInt(errorCode)
+            parcel.writeString(message)
+        } catch (e: Exception) {
+            parcel.recycle()
+            throw e
+        }
+
+        // The returned Parcel will be written to the Binder reply by BinderInterceptor.
+        // On the client side, this will be decoded and rethrown as a ServiceSpecificException.
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
 }

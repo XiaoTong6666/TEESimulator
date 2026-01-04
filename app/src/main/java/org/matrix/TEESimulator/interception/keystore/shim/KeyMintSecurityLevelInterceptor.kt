@@ -405,6 +405,56 @@ class KeyMintSecurityLevelInterceptor(
             attestationKeys.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
+
+        fun findSoftwareKey(uid: Int, descriptor: KeyDescriptor): GeneratedKeyInfo? {
+            if (!descriptor.alias.isNullOrEmpty()) {
+                val keyId = KeyIdentifier(uid, descriptor.alias)
+                val info = generatedKeys[keyId]
+                if (info != null) return info
+            }
+
+            if (descriptor.nspace != 0L) {
+                return generatedKeys.entries
+                    .filter { it.key.uid == uid }
+                    .map { it.value }
+                    .find { it.nspace == descriptor.nspace }
+            }
+            return null
+        }
+
+        fun cleanupByNspace(uid: Int, nspace: Long) {
+            val iterator = generatedKeys.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.key.uid == uid && entry.value.nspace == nspace) {
+                    SystemLogger.debug("Removing software key by nspace: ${entry.key}")
+                    iterator.remove()
+                    patchedChains.remove(entry.key)
+                    attestationKeys.remove(entry.key)
+                }
+            }
+        }
+
+        fun updateSoftwareKey(
+            uid: Int,
+            descriptor: KeyDescriptor,
+            publicCert: ByteArray?,
+            certificateChain: ByteArray?,
+        ) {
+            val keyInfo = findSoftwareKey(uid, descriptor) ?: return
+
+            if (publicCert != null && publicCert.isNotEmpty()) {
+                keyInfo.response.metadata.certificate = publicCert
+                SystemLogger.info("Updated public certificate for software key.")
+            }
+
+            if (certificateChain != null && certificateChain.isNotEmpty()) {
+                keyInfo.response.metadata.certificateChain = certificateChain
+                SystemLogger.info("Updated certificate chain for software key.")
+            }
+
+            patchedChains.remove(KeyIdentifier(uid, descriptor.alias ?: ""))
+        }
     }
 }
 

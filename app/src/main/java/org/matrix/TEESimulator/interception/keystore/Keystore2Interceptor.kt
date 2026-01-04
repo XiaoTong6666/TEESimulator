@@ -31,7 +31,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry")
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
-
+    private val UPDATE_SUBCOMPONENT_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "updateSubcomponent")
     private val transactionNames: Map<Int, String> by lazy {
         IKeystoreService.Stub::class
             .java
@@ -89,7 +90,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == GET_KEY_ENTRY_TRANSACTION || code == DELETE_KEY_TRANSACTION) {
+        if (
+            code == GET_KEY_ENTRY_TRANSACTION ||
+                code == DELETE_KEY_TRANSACTION ||
+                code == UPDATE_SUBCOMPONENT_TRANSACTION
+        ) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
@@ -100,14 +105,50 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             if (ConfigurationManager.shouldSkipUid(callingUid))
                 return TransactionResult.ContinueAndSkipPost
 
-            SystemLogger.info("Handling ${transactionNames[code]!!} ${descriptor.alias}")
-            val keyId = KeyIdentifier(callingUid, descriptor.alias)
+            SystemLogger.info(
+                "Handling ${transactionNames[code]!!} ${descriptor.alias ?: "null"} [nspace=${descriptor.nspace}]"
+            )
+
+            val softwareKeyInfo =
+                KeyMintSecurityLevelInterceptor.findSoftwareKey(callingUid, descriptor)
+            val isSoftwareKey = softwareKeyInfo != null
+
+            val keyId = KeyIdentifier(callingUid, descriptor.alias ?: "")
 
             if (code == DELETE_KEY_TRANSACTION) {
-                if (KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId) != null) {
-                    KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                if (isSoftwareKey) {
+                    if (!descriptor.alias.isNullOrEmpty()) {
+                        KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                    } else {
+                        KeyMintSecurityLevelInterceptor.cleanupByNspace(
+                            callingUid,
+                            descriptor.nspace,
+                        )
+                    }
+
                     SystemLogger.info(
-                        "[TX_ID: $txId] Deleted cached keypair ${descriptor.alias}, replying with empty response."
+                        "[TX_ID: $txId] Deleted cached keypair (Software), replying with empty response."
+                    )
+                    return InterceptorUtils.createSuccessReply(writeResultCode = false)
+                }
+                return TransactionResult.ContinueAndSkipPost
+            }
+
+            if (code == UPDATE_SUBCOMPONENT_TRANSACTION) {
+
+                if (isSoftwareKey) {
+                    val publicCert = data.createByteArray()
+                    val certificateChain = data.createByteArray()
+
+                    SystemLogger.info(
+                        "[TX_ID: $txId] Intercepting updateSubcomponent for Software Key. Updating memory state."
+                    )
+
+                    KeyMintSecurityLevelInterceptor.updateSoftwareKey(
+                        callingUid,
+                        descriptor,
+                        publicCert,
+                        certificateChain,
                     )
                     return InterceptorUtils.createSuccessReply(writeResultCode = false)
                 }
@@ -125,15 +166,20 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             response.metadata?.authorizations?.forEach {
                 KeyMintParameterLogger.logParameter(it.keyParameter)
             }
-            return InterceptorUtils.createTypedObjectReply(response)
-        } else {
-            logTransaction(
-                txId,
-                transactionNames[code] ?: "unknown code=$code",
-                callingUid,
-                callingPid,
-                true,
-            )
+
+            // GET_KEY_ENTRY
+            if (isSoftwareKey) {
+                SystemLogger.info("[TX_ID: $txId] Found generated response for software key.")
+                return InterceptorUtils.createTypedObjectReply(softwareKeyInfo!!.response)
+            } else {
+                logTransaction(
+                    txId,
+                    transactionNames[code] ?: "unknown code=$code",
+                    callingUid,
+                    callingPid,
+                    true,
+                )
+            }
         }
 
         // Let most calls go through to the real service.

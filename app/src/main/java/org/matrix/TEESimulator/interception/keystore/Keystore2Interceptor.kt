@@ -6,6 +6,7 @@ import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
+import android.system.keystore2.Domain
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
 import android.system.keystore2.KeyEntryResponse
@@ -29,6 +30,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     // Transaction codes for the IKeystoreService interface methods we are interested in.
     private val GET_KEY_ENTRY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry")
+    private val LIST_ENTRIES_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntries").also {
+            SystemLogger.info("LIST_ENTRIES_TRANSACTION code: $it")
+        }
+    private val LIST_ENTRIES_BATCHED_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntriesBatched")
+            .also { SystemLogger.info("LIST_ENTRIES_BATCHED_TRANSACTION code: $it") }
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
     private val UPDATE_SUBCOMPONENT_TRANSACTION =
@@ -81,6 +89,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
     }
 
+    // Thread-local storage for listEntries parameters to avoid re-parsing in onPostTransact
+    // Triple<domain, namespace, startPastAlias?>
+    private val listEntriesParams = ThreadLocal<Triple<Int, Long, String?>?>()
+
     override fun onPreTransact(
         txId: Long,
         target: IBinder,
@@ -90,6 +102,66 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
+        // Debug: Log all transaction codes to see if listEntries is being called
+        if (
+            code !in
+                setOf(
+                    GET_KEY_ENTRY_TRANSACTION,
+                    DELETE_KEY_TRANSACTION,
+                    UPDATE_SUBCOMPONENT_TRANSACTION,
+                    LIST_ENTRIES_TRANSACTION,
+                    LIST_ENTRIES_BATCHED_TRANSACTION,
+                )
+        ) {
+            val methodName = transactionNames[code] ?: "unknown"
+            SystemLogger.debug(
+                "[TX_ID: $txId] Unhandled transaction: code=$code, method=$methodName, uid=$callingUid"
+            )
+        }
+
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            val methodName =
+                if (code == LIST_ENTRIES_BATCHED_TRANSACTION) "listEntriesBatched"
+                else "listEntries"
+            SystemLogger.info("[TX_ID: $txId] $methodName called by UID $callingUid")
+            if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                listEntriesParams.set(null)
+                SystemLogger.debug(
+                    "[TX_ID: $txId] $methodName: Skipping UID $callingUid (in skip list)"
+                )
+                return TransactionResult.ContinueAndSkipPost
+            }
+
+            return runCatching {
+                    data.setDataPosition(0)
+                    data.enforceInterface(IKeystoreService.DESCRIPTOR)
+                    val domain = data.readInt()
+                    val namespace = data.readLong()
+
+                    // Read startPastAlias for listEntriesBatched (AOSP pagination support)
+                    var startPastAlias: String? = null
+                    if (code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+                        startPastAlias = data.readString()
+                    }
+
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] $methodName: domain=$domain, namespace=$namespace, startPastAlias=$startPastAlias"
+                    )
+
+                    // Cache parameters for post-transaction processing
+                    listEntriesParams.set(Triple(domain, namespace, startPastAlias))
+
+                    // Reset data position for AOSP to process
+                    data.setDataPosition(0)
+                    TransactionResult.Continue
+                }
+                .getOrElse { e ->
+                    SystemLogger.error("[TX_ID: $txId] Failed to parse $methodName parameters", e)
+                    listEntriesParams.set(null)
+                    TransactionResult.ContinueAndSkipPost
+                }
+        }
+
         if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
@@ -200,6 +272,166 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            val methodName =
+                if (code == LIST_ENTRIES_BATCHED_TRANSACTION) "listEntriesBatched"
+                else "listEntries"
+            return runCatching {
+                    val params = listEntriesParams.get()
+                    if (params == null) {
+                        SystemLogger.warning(
+                            "[TX_ID: $txId] $methodName: No cached parameters, skipping injection."
+                        )
+                        return TransactionResult.SkipTransaction
+                    }
+
+                    val (domain, namespace, startPastAlias) = params
+                    listEntriesParams.remove()
+
+                    logTransaction(txId, "post-$methodName", callingUid, callingPid)
+
+                    if (domain != Domain.APP) {
+                        SystemLogger.debug(
+                            "[TX_ID: $txId] listEntries: domain=$domain (not APP), skipping injection."
+                        )
+                        return TransactionResult.SkipTransaction
+                    }
+
+                    if (namespace != callingUid.toLong() && namespace != -1L) {
+                        SystemLogger.debug(
+                            "[TX_ID: $txId] $methodName: namespace ($namespace) != callingUid ($callingUid) and not -1, skipping injection."
+                        )
+                        return TransactionResult.SkipTransaction
+                    }
+
+                    val effectiveNamespace =
+                        if (namespace == -1L) callingUid.toLong() else namespace
+
+                    // Get all virtual keys for this UID
+                    val allFakeKeys =
+                        KeyMintSecurityLevelInterceptor.getSoftwareKeyDescriptorsForUid(
+                            callingUid,
+                            effectiveNamespace,
+                        )
+
+                    // AOSP behavior: Apply startPastAlias filtering for pagination
+                    // Only include keys with alias > startPastAlias (lexicographic order)
+                    val fakeKeys =
+                        if (startPastAlias != null) {
+                            allFakeKeys.filter { (it.alias ?: "") > startPastAlias }
+                        } else {
+                            allFakeKeys
+                        }
+
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] $methodName: Found ${fakeKeys.size} virtual keys for UID $callingUid (after startPastAlias='$startPastAlias' filter)"
+                    )
+                    if (fakeKeys.isNotEmpty()) {
+                        fakeKeys.forEach { fk ->
+                            SystemLogger.debug(
+                                "[TX_ID: $txId] listEntries: Virtual key alias='${fk.alias}' domain=${fk.domain} nspace=${fk.nspace}"
+                            )
+                        }
+                    }
+
+                    if (fakeKeys.isEmpty()) return TransactionResult.SkipTransaction
+
+                    reply.setDataPosition(0)
+                    reply.readException()
+
+                    val arrayLen = reply.readInt()
+                    val encoding = detectKeyDescriptorEncoding(reply, arrayLen)
+
+                    val originalKeys = ArrayList<KeyDescriptor>(maxOf(arrayLen, 0))
+                    val existingAliases = HashSet<String>()
+
+                    if (arrayLen > 0) {
+                        repeat(arrayLen) {
+                            val kd = readKeyDescriptor(reply, encoding)
+                            if (kd != null) {
+                                originalKeys.add(kd)
+                                kd.alias?.let { existingAliases.add(it) }
+                            }
+                        }
+                    }
+
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] listEntries: Read ${originalKeys.size} original keys from AOSP (arrayLen=$arrayLen)"
+                    )
+
+                    val mergedList = ArrayList<KeyDescriptor>(originalKeys.size + fakeKeys.size)
+                    mergedList.addAll(originalKeys)
+
+                    var injectedCount = 0
+                    for (fakeKey in fakeKeys) {
+                        val alias = fakeKey.alias
+                        if (alias != null) {
+                            if (existingAliases.add(alias)) {
+                                mergedList.add(fakeKey)
+                                injectedCount++
+                                SystemLogger.debug(
+                                    "[TX_ID: $txId] listEntries: Injected virtual key '$alias'"
+                                )
+                            } else {
+                                SystemLogger.warning(
+                                    "[TX_ID: $txId] listEntries: Skipped duplicate virtual key '$alias' (already in AOSP list)"
+                                )
+                            }
+                        } else {
+                            SystemLogger.warning(
+                                "[TX_ID: $txId] listEntries: Skipped virtual key with null alias"
+                            )
+                        }
+                    }
+
+                    if (injectedCount <= 0) {
+                        SystemLogger.warning(
+                            "[TX_ID: $txId] listEntries: No virtual keys were injected (all duplicates or null aliases)"
+                        )
+                        return TransactionResult.SkipTransaction
+                    }
+
+                    mergedList.sortBy { it.alias }
+
+                    val maxReplySize = 350_000 // ~350KB
+                    var estimatedSize = 0
+                    val finalList = ArrayList<KeyDescriptor>()
+                    for (kd in mergedList) {
+                        val entrySize = 16 + (kd.alias?.length ?: 0)
+                        if (estimatedSize + entrySize > maxReplySize) {
+                            SystemLogger.warning(
+                                "[TX_ID: $txId] Truncating listEntries from ${mergedList.size} to ${finalList.size} entries (size limit ~350KB)."
+                            )
+                            break
+                        }
+                        finalList.add(kd)
+                        estimatedSize += entrySize
+                    }
+
+                    SystemLogger.info(
+                        "[TX_ID: $txId] Injecting $injectedCount virtual keys into listEntries (Manual Parcel). Total: ${finalList.size} entries."
+                    )
+
+                    val newReply = Parcel.obtain()
+                    try {
+                        newReply.writeNoException()
+                        newReply.writeInt(finalList.size)
+                        for (kd in finalList) {
+                            writeKeyDescriptor(newReply, kd, encoding)
+                        }
+                    } catch (e: Exception) {
+                        newReply.recycle()
+                        throw e
+                    }
+
+                    TransactionResult.OverrideReply(newReply)
+                }
+                .getOrElse { e ->
+                    SystemLogger.error("[TX_ID: $txId] Failed to inject listEntries reply.", e)
+                    TransactionResult.SkipTransaction
+                }
+        }
+
         if (code == GET_KEY_ENTRY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
@@ -268,5 +500,96 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             }
         }
         return TransactionResult.SkipTransaction
+    }
+
+    private data class KeyDescriptorEncoding(
+        val hasPresenceMarker: Boolean,
+        val hasParcelableSizeHeader: Boolean,
+    )
+
+    private fun detectKeyDescriptorEncoding(reply: Parcel, arrayLen: Int): KeyDescriptorEncoding {
+        if (arrayLen <= 0) {
+            val hasParcelableSizeHeader =
+                runCatching {
+                        KeyDescriptor::class
+                            .java
+                            .getDeclaredMethod("readFromParcel", Parcel::class.java)
+                        true
+                    }
+                    .getOrDefault(false)
+            return KeyDescriptorEncoding(
+                hasPresenceMarker = false,
+                hasParcelableSizeHeader = hasParcelableSizeHeader,
+            )
+        }
+
+        val startPos = reply.dataPosition()
+        val first = reply.readInt()
+
+        val hasPresenceMarker = first == 1
+        val probe = if (hasPresenceMarker) reply.readInt() else first
+
+        val hasParcelableSizeHeader = probe >= 16
+
+        reply.setDataPosition(startPos)
+        return KeyDescriptorEncoding(hasPresenceMarker, hasParcelableSizeHeader)
+    }
+
+    private fun readKeyDescriptor(reply: Parcel, encoding: KeyDescriptorEncoding): KeyDescriptor? {
+        if (encoding.hasPresenceMarker) {
+            val present = reply.readInt()
+            if (present == 0) return null
+        }
+
+        return if (encoding.hasParcelableSizeHeader) {
+            val startPos = reply.dataPosition()
+            val parcelableSize = reply.readInt()
+            val endPos = startPos + parcelableSize
+
+            val kd = KeyDescriptor()
+            kd.domain = reply.readInt()
+            kd.nspace = reply.readLong()
+            kd.alias = reply.readString()
+            kd.blob = reply.createByteArray()
+
+            reply.setDataPosition(endPos)
+            kd
+        } else {
+            val kd = KeyDescriptor()
+            kd.domain = reply.readInt()
+            kd.nspace = reply.readLong()
+            kd.alias = reply.readString()
+            kd.blob = reply.createByteArray()
+            kd
+        }
+    }
+
+    private fun writeKeyDescriptor(
+        reply: Parcel,
+        kd: KeyDescriptor,
+        encoding: KeyDescriptorEncoding,
+    ) {
+        if (encoding.hasPresenceMarker) {
+            reply.writeInt(1)
+        }
+
+        if (encoding.hasParcelableSizeHeader) {
+            val startPos = reply.dataPosition()
+            reply.writeInt(0)
+            reply.writeInt(kd.domain)
+            reply.writeLong(kd.nspace)
+            reply.writeString(kd.alias)
+            reply.writeByteArray(kd.blob)
+            val endPos = reply.dataPosition()
+
+            reply.setDataPosition(startPos)
+            reply.writeInt(endPos - startPos)
+            reply.setDataPosition(endPos)
+        } else {
+            reply.writeInt(kd.domain)
+            reply.writeLong(kd.nspace)
+            reply.writeString(kd.alias)
+            reply.writeByteArray(kd.blob)
+        }
     }
 }

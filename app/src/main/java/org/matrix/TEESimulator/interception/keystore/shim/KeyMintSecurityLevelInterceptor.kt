@@ -355,6 +355,30 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys[keyId]?.response
 
         /**
+         * Gets all software-simulated key descriptors for a given UID.
+         *
+         * Used by `IKeystoreService.listEntries()` interception to inject virtual keys into the
+         * returned list, preventing state inconsistency (missing-from-list) checks.
+         *
+         * @param uid The calling UID to filter keys by.
+         * @param namespace The namespace parameter from listEntries (should equal uid for APP
+         *   domain).
+         * @return List of KeyDescriptor objects representing virtual keys for this UID.
+         */
+        fun getSoftwareKeyDescriptorsForUid(uid: Int, namespace: Long): List<KeyDescriptor> {
+            return generatedKeys.entries
+                .filter { it.key.uid == uid }
+                .map { (keyIdentifier, info) ->
+                    KeyDescriptor().apply {
+                        domain = Domain.APP
+                        nspace = namespace
+                        alias = keyIdentifier.alias
+                        blob = null
+                    }
+                }
+        }
+
+        /**
          * Finds a software-generated key by first filtering all known keys by the caller's UID, and
          * then matching the specific nspace.
          *

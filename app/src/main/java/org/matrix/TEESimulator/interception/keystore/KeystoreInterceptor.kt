@@ -107,6 +107,15 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
                 if (data.readInt() == 1) {
                     keymasterArgs.readFromParcel(data)
                 }
+                // Validate Attestation Challenge length in generateKey args
+                val challenge =
+                    keymasterArgs.getBytes(KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE, ByteArray(0))
+                if (challenge.size > 128) {
+                    SystemLogger.info(
+                        "[TX_ID: $txId] Rejecting generateKey: attestation challenge length exceeds 128 bytes (${challenge.size})"
+                    )
+                    throw IllegalArgumentException("Attestation challenge too large")
+                }
                 keygenParameters[keyId] =
                     LegacyKeygenParameters.fromKeymasterArguments(keymasterArgs)
 
@@ -229,7 +238,13 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
                             KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE,
                             ByteArray(0),
                         )
-                    params.attestationChallenge = challenge
+                    // Validate Attestation Challenge length in attestKey args
+                    if (challenge.size > 128) {
+                        SystemLogger.info(
+                            "[TX_ID: $txId] Rejecting attestKey: attestation challenge length exceeds 128 bytes (${challenge.size})."
+                        )
+                        throw IllegalArgumentException("Attestation challenge too large")
+                    }
                     params.attestationChallenge = challenge
                 }
 
@@ -435,6 +450,7 @@ private data class LegacyKeygenParameters(
          * The RSA public exponent is not accessible via a public API in KeymasterArguments, so we
          * must use reflection to extract it.
          */
+        @SuppressLint("SoonBlockedPrivateApi")
         private fun getRsaExponent(args: KeymasterArguments): BigInteger? {
             return runCatching {
                     val getArgumentByTag =

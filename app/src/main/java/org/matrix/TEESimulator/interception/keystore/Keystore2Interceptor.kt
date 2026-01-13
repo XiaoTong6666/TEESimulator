@@ -29,6 +29,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     // Transaction codes for the IKeystoreService interface methods we are interested in.
     private val GET_KEY_ENTRY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry")
+    private val LIST_ENTRIES_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntries").also {
+            SystemLogger.info("LIST_ENTRIES_TRANSACTION code: $it")
+        }
+    private val LIST_ENTRIES_BATCHED_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntriesBatched")
+            .also { SystemLogger.info("LIST_ENTRIES_BATCHED_TRANSACTION code: $it") }
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
     private val UPDATE_SUBCOMPONENT_TRANSACTION =
@@ -81,6 +88,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
     }
 
+    private val pendingListEntriesParams =
+        java.util.concurrent.ConcurrentHashMap<Long, Triple<Int, Long, String?>>()
+
     override fun onPreTransact(
         txId: Long,
         target: IBinder,
@@ -90,6 +100,61 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
+        if (
+            code !in
+                setOf(
+                    GET_KEY_ENTRY_TRANSACTION,
+                    DELETE_KEY_TRANSACTION,
+                    UPDATE_SUBCOMPONENT_TRANSACTION,
+                    LIST_ENTRIES_TRANSACTION,
+                    LIST_ENTRIES_BATCHED_TRANSACTION,
+                )
+        ) {
+            val methodName = transactionNames[code] ?: "unknown"
+            SystemLogger.debug(
+                "[TX_ID: $txId] Unhandled transaction: code=$code, method=$methodName, uid=$callingUid"
+            )
+        }
+
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            val methodName =
+                if (code == LIST_ENTRIES_BATCHED_TRANSACTION) "listEntriesBatched"
+                else "listEntries"
+            SystemLogger.info("[TX_ID: $txId] $methodName called by UID $callingUid")
+            if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                SystemLogger.debug(
+                    "[TX_ID: $txId] $methodName: Skipping UID $callingUid (in skip list)"
+                )
+                return TransactionResult.ContinueAndSkipPost
+            }
+
+            return runCatching {
+                    data.setDataPosition(0)
+                    data.enforceInterface(IKeystoreService.DESCRIPTOR)
+                    val domain = data.readInt()
+                    val namespace = data.readLong()
+
+                    var startPastAlias: String? = null
+                    if (code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+                        startPastAlias = data.readString()
+                    }
+
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] $methodName: domain=$domain, namespace=$namespace, startPastAlias=$startPastAlias"
+                    )
+
+                    pendingListEntriesParams[txId] = Triple(domain, namespace, startPastAlias)
+
+                    data.setDataPosition(0)
+                    TransactionResult.Continue
+                }
+                .getOrElse { e ->
+                    SystemLogger.error("[TX_ID: $txId] Failed to parse $methodName parameters", e)
+                    pendingListEntriesParams.remove(txId)
+                    TransactionResult.ContinueAndSkipPost
+                }
+        }
+
         if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
@@ -197,8 +262,102 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): TransactionResult {
-        if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
+        if (reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
+
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            val methodName =
+                if (code == LIST_ENTRIES_BATCHED_TRANSACTION) "listEntriesBatched"
+                else "listEntries"
+            return runCatching {
+                    val params = pendingListEntriesParams.remove(txId)
+                    if (params == null) {
+                        return TransactionResult.SkipTransaction
+                    }
+
+                    val (domain, namespace, startPastAlias) = params
+
+                    if (domain != android.system.keystore2.Domain.APP)
+                        return TransactionResult.SkipTransaction
+
+                    val effectiveNamespace =
+                        if (namespace == -1L) callingUid.toLong() else namespace
+                    if (effectiveNamespace != callingUid.toLong())
+                        return TransactionResult.SkipTransaction
+
+                    val virtualKeys =
+                        KeyMintSecurityLevelInterceptor.getSystemKeyDescriptorsForUid(
+                            callingUid,
+                            effectiveNamespace,
+                        )
+
+                    val filteredVirtualKeys =
+                        if (startPastAlias != null) {
+                            val aliasField =
+                                Class.forName("android.system.keystore2.KeyDescriptor")
+                                    .getField("alias")
+                            virtualKeys.filter {
+                                val alias = aliasField.get(it) as? String ?: ""
+                                alias > startPastAlias
+                            }
+                        } else {
+                            virtualKeys
+                        }
+
+                    if (filteredVirtualKeys.isEmpty()) return TransactionResult.SkipTransaction
+
+                    reply.setDataPosition(0)
+                    reply.readException()
+
+                    val systemKeyDescClass = Class.forName("android.system.keystore2.KeyDescriptor")
+                    val creatorField = systemKeyDescClass.getField("CREATOR")
+                    val creator = creatorField.get(null) as android.os.Parcelable.Creator<*>
+
+                    val originalList = reply.createTypedArray(creator) ?: emptyArray()
+
+                    val aliasField = systemKeyDescClass.getField("alias")
+                    val combinedMap = java.util.TreeMap<String, Any>()
+
+                    for (item in originalList) {
+                        val alias = aliasField.get(item) as? String
+                        if (alias != null) combinedMap[alias] = item
+                    }
+
+                    for (item in filteredVirtualKeys) {
+                        val alias = aliasField.get(item) as? String
+                        if (alias != null) {
+                            combinedMap[alias] = item
+                        }
+                    }
+
+                    SystemLogger.info(
+                        "[TX_ID: $txId] $methodName: Merged ${originalList.size} hardware + ${filteredVirtualKeys.size} software keys."
+                    )
+
+                    val mergedArray =
+                        java.lang.reflect.Array.newInstance(systemKeyDescClass, combinedMap.size)
+                            as Array<Any>
+                    var i = 0
+                    for (item in combinedMap.values) {
+                        mergedArray[i++] = item
+                    }
+
+                    val newReply = Parcel.obtain()
+                    try {
+                        newReply.writeNoException()
+                        newReply.writeTypedArray(mergedArray as Array<android.os.Parcelable>, 0)
+                    } catch (e: Exception) {
+                        newReply.recycle()
+                        throw e
+                    }
+
+                    TransactionResult.OverrideReply(newReply)
+                }
+                .getOrElse { e ->
+                    SystemLogger.error("[TX_ID: $txId] Failed to inject listEntries reply.", e)
+                    TransactionResult.SkipTransaction
+                }
+        }
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)

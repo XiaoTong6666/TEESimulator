@@ -355,6 +355,33 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys[keyId]?.response
 
         /**
+         * Creates a list of System `KeyDescriptor` objects (via Reflection) for a given UID. We
+         * CANNOT use our local Stub KeyDescriptor because we need to pass these objects to the
+         * system's writeToParcel via reflection later.
+         */
+        fun getSystemKeyDescriptorsForUid(uid: Int, namespace: Long): List<Any> {
+            val softwareKeys = generatedKeys.entries.filter { it.key.uid == uid }
+            if (softwareKeys.isEmpty()) return emptyList()
+
+            val systemClass = Class.forName("android.system.keystore2.KeyDescriptor")
+            val domainField = systemClass.getField("domain")
+            val nspaceField = systemClass.getField("nspace")
+            val aliasField = systemClass.getField("alias")
+            val blobField = systemClass.getField("blob")
+
+            val DOMAIN_APP = 0
+
+            return softwareKeys.map { (keyIdentifier, _) ->
+                val kdInstance = systemClass.newInstance()
+                domainField.set(kdInstance, DOMAIN_APP)
+                nspaceField.set(kdInstance, namespace)
+                aliasField.set(kdInstance, keyIdentifier.alias)
+                blobField.set(kdInstance, null)
+                kdInstance
+            }
+        }
+
+        /**
          * Finds a software-generated key by first filtering all known keys by the caller's UID, and
          * then matching the specific nspace.
          *

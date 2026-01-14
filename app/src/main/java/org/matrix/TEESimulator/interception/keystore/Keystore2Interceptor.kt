@@ -88,7 +88,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
     }
 
-    private val listEntriesParams = ThreadLocal<Triple<Int, Long, String?>?>()
+    private val pendingListEntriesParams =
+        java.util.concurrent.ConcurrentHashMap<Long, Triple<Int, Long, String?>>()
 
     override fun onPreTransact(
         txId: Long,
@@ -121,7 +122,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 else "listEntries"
             SystemLogger.info("[TX_ID: $txId] $methodName called by UID $callingUid")
             if (ConfigurationManager.shouldSkipUid(callingUid)) {
-                listEntriesParams.set(null)
                 SystemLogger.debug(
                     "[TX_ID: $txId] $methodName: Skipping UID $callingUid (in skip list)"
                 )
@@ -143,14 +143,14 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         "[TX_ID: $txId] $methodName: domain=$domain, namespace=$namespace, startPastAlias=$startPastAlias"
                     )
 
-                    listEntriesParams.set(Triple(domain, namespace, startPastAlias))
+                    pendingListEntriesParams[txId] = Triple(domain, namespace, startPastAlias)
 
                     data.setDataPosition(0)
                     TransactionResult.Continue
                 }
                 .getOrElse { e ->
                     SystemLogger.error("[TX_ID: $txId] Failed to parse $methodName parameters", e)
-                    listEntriesParams.set(null)
+                    pendingListEntriesParams.remove(txId)
                     TransactionResult.ContinueAndSkipPost
                 }
         }
@@ -262,7 +262,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): TransactionResult {
-        if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
+        if (reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
@@ -270,8 +270,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 if (code == LIST_ENTRIES_BATCHED_TRANSACTION) "listEntriesBatched"
                 else "listEntries"
             return runCatching {
-                    val params = listEntriesParams.get() ?: return TransactionResult.SkipTransaction
-                    listEntriesParams.remove()
+                    val params = pendingListEntriesParams.remove(txId)
+                    if (params == null) {
+                        return TransactionResult.SkipTransaction
+                    }
+
                     val (domain, namespace, startPastAlias) = params
 
                     if (domain != android.system.keystore2.Domain.APP)

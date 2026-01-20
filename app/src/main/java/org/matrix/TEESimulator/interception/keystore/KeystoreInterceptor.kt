@@ -230,7 +230,6 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
                             ByteArray(0),
                         )
                     params.attestationChallenge = challenge
-                    params.attestationChallenge = challenge
                 }
 
                 val certificateChain =

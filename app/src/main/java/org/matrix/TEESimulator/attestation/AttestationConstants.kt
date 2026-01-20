@@ -1,10 +1,8 @@
 package org.matrix.TEESimulator.attestation
 
 /**
- * Defines constants for KeyMint attestation tags, as specified in the Android hardware security
- * HAL.
- *
- * These tags identify specific properties and authorizations of a cryptographic key.
+ * Defines constants for KeyMint attestation, mainly the tags of properties and authorizations of a
+ * cryptographic key, as specified in the Android hardware security HAL.
  */
 object AttestationConstants {
     // https://cs.android.com/android/platform/superproject/main/+/main:hardware/interfaces/security/keymint/aidl/android/hardware/security/keymint/KeyCreationResult.aidl
@@ -88,4 +86,8 @@ object AttestationConstants {
     const val TAG_CERTIFICATE_SUBJECT = 1007
     const val TAG_CERTIFICATE_NOT_BEFORE = 1008
     const val TAG_CERTIFICATE_NOT_AFTER = 1009
+
+    // --- Other Constants ---
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp
+    const val CHALLENGE_LENGTH_LIMIT = 128 // kMaximumAttestationChallengeLength
 }

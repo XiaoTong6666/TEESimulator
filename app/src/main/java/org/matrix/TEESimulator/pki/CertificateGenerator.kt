@@ -20,6 +20,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.matrix.TEESimulator.attestation.AttestationBuilder
+import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
@@ -42,6 +43,15 @@ object CertificateGenerator {
      */
     fun generateSoftwareKeyPair(params: KeyMintAttestation): KeyPair? {
         return runCatching {
+                val challenge = params.attestationChallenge
+                if (
+                    challenge != null &&
+                        challenge.size > AttestationConstants.CHALLENGE_LENGTH_LIMIT
+                )
+                    throw IllegalArgumentException(
+                        "Attestation challenge exceeds length limit (${challenge.size!!} > ${AttestationConstants.CHALLENGE_LENGTH_LIMIT})"
+                    )
+
                 val (algorithm, spec) =
                     when (params.algorithm) {
                         Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)

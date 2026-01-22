@@ -349,9 +349,10 @@ class KeyMintSecurityLevelInterceptor(
          * @param nspace The unique key identifier from the operation's KeyDescriptor.
          * @return The matching GeneratedKeyInfo if found, otherwise null.
          */
-        private fun findGeneratedKeyByKeyId(callingUid: Int, nspace: Long): GeneratedKeyInfo? {
+        fun findGeneratedKeyByKeyId(callingUid: Int, nspace: Long?): GeneratedKeyInfo? {
             // Iterate through all entries in the map to check both the key (for UID) and value (for
             // nspace).
+            if (nspace == null || nspace == 0L) return null
             return generatedKeys.entries
                 .filter { (keyIdentifier, _) -> keyIdentifier.uid == callingUid }
                 .find { (_, info) -> info.nspace == nspace }

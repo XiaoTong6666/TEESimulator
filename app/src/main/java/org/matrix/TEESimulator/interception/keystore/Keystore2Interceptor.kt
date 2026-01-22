@@ -31,6 +31,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry")
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
+    private val UPDATE_SUBCOMPONENT_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "updateSubcomponent")
 
     private val transactionNames: Map<Int, String> by lazy {
         IKeystoreService.Stub::class
@@ -89,16 +91,23 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == GET_KEY_ENTRY_TRANSACTION || code == DELETE_KEY_TRANSACTION) {
+        if (
+            code == GET_KEY_ENTRY_TRANSACTION ||
+                code == DELETE_KEY_TRANSACTION ||
+                code == UPDATE_SUBCOMPONENT_TRANSACTION
+        ) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+            if (ConfigurationManager.shouldSkipUid(callingUid))
+                return TransactionResult.ContinueAndSkipPost
+
+            if (code == UPDATE_SUBCOMPONENT_TRANSACTION)
+                return handleUpdateSubcomponent(callingUid, data)
 
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val descriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
-
-            if (ConfigurationManager.shouldSkipUid(callingUid))
-                return TransactionResult.ContinueAndSkipPost
 
             SystemLogger.info("Handling ${transactionNames[code]!!} ${descriptor.alias}")
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
@@ -222,5 +231,26 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             }
         }
         return TransactionResult.SkipTransaction
+    }
+
+    private fun handleUpdateSubcomponent(callingUid: Int, data: Parcel): TransactionResult {
+        data.enforceInterface(IKeystoreService.DESCRIPTOR)
+        val descriptor = data.readTypedObject(KeyDescriptor.CREATOR)
+        val generatedKeyInfo =
+            KeyMintSecurityLevelInterceptor.findGeneratedKeyByKeyId(callingUid, descriptor?.nspace)
+                ?: return TransactionResult.Continue
+
+        SystemLogger.info("Updating sub-component with key[${generatedKeyInfo.nspace}]")
+        val metadata = generatedKeyInfo.response.metadata
+        val publicCert = data.createByteArray()
+        val certificateChain = data.createByteArray()
+
+        metadata.certificate = publicCert
+        metadata.certificateChain = certificateChain
+        SystemLogger.verbose(
+            "Key updated with sizes: [publicCert, certificateChain] = [${publicCert?.size}, ${certificateChain?.size}]"
+        )
+
+        return InterceptorUtils.createSuccessReply(writeResultCode = false)
     }
 }

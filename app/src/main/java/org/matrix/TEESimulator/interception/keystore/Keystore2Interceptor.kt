@@ -107,7 +107,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val descriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
-                    ?: return TransactionResult.SkipTransaction
+                    ?: return TransactionResult.ContinueAndSkipPost
 
             SystemLogger.info("Handling ${transactionNames[code]!!} ${descriptor.alias}")
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
@@ -238,7 +238,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         val descriptor = data.readTypedObject(KeyDescriptor.CREATOR)
         val generatedKeyInfo =
             KeyMintSecurityLevelInterceptor.findGeneratedKeyByKeyId(callingUid, descriptor?.nspace)
-                ?: return TransactionResult.Continue
+                ?: return TransactionResult.ContinueAndSkipPost
 
         SystemLogger.info("Updating sub-component with key[${generatedKeyInfo.nspace}]")
         val metadata = generatedKeyInfo.response.metadata

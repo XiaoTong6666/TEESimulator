@@ -192,13 +192,15 @@ object DeviceAttestationService {
                 ASN1Sequence.getInstance(
                     fields[AttestationConstants.KEY_DESCRIPTION_SOFTWARE_ENFORCED_INDEX]
                 )
-            if (softwareEnforced.size() >= 3) {
-                moduleHash =
-                    ASN1OctetString.getInstance(
-                            ASN1TaggedObject.getInstance(softwareEnforced.getObjectAt(2)).baseObject
-                        )
-                        .octets
-            }
+            moduleHash =
+                softwareEnforced
+                    .toArray()
+                    .firstOrNull {
+                        (it as? ASN1TaggedObject)?.tagNo == AttestationConstants.TAG_MODULE_HASH
+                    }
+                    ?.let {
+                        ASN1OctetString.getInstance((it as ASN1TaggedObject).baseObject).octets
+                    }
 
             val teeEnforced =
                 ASN1Sequence.getInstance(

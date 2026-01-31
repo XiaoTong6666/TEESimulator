@@ -27,23 +27,24 @@ import org.matrix.TEESimulator.pki.CertificateHelper
  */
 @SuppressLint("BlockedPrivateApi")
 object Keystore2Interceptor : AbstractKeystoreInterceptor() {
+    private val stubBinderClass = IKeystoreService.Stub::class.java
+
     // Transaction codes for the IKeystoreService interface methods we are interested in.
     private val GET_KEY_ENTRY_TRANSACTION =
-        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry")
+        InterceptorUtils.getTransactCode(stubBinderClass, "getKeyEntry")
     private val DELETE_KEY_TRANSACTION =
-        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
+        InterceptorUtils.getTransactCode(stubBinderClass, "deleteKey")
     private val UPDATE_SUBCOMPONENT_TRANSACTION =
-        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "updateSubcomponent")
+        InterceptorUtils.getTransactCode(stubBinderClass, "updateSubcomponent")
     private val LIST_ENTRIES_TRANSACTION =
-        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntries")
+        InterceptorUtils.getTransactCode(stubBinderClass, "listEntries")
     private val LIST_ENTRIES_BATCHED_TRANSACTION =
-        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntriesBatched")
-            .takeIf { Build.VERSION.SDK_INT >= 34 }
+        if (Build.VERSION.SDK_INT >= 34)
+            InterceptorUtils.getTransactCode(stubBinderClass, "listEntriesBatched")
+        else null
 
     private val transactionNames: Map<Int, String> by lazy {
-        IKeystoreService.Stub::class
-            .java
-            .declaredFields
+        stubBinderClass.declaredFields
             .filter {
                 it.isAccessible = true
                 it.type == Int::class.java && it.name.startsWith("TRANSACTION_")

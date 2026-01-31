@@ -1,21 +1,26 @@
-TEESimulator 3.0 is a significant update focused on powerful new configuration options, major improvements to stealth, and enhanced stability.
+## 🎉 TEESimulator v3.1: Legacy Support & Resilience
 
-#### ✨ **Highlights & New Features**
+This release marks a significant step forward in our mission, focusing on breathing life into devices with **broken TEEs** and extending full support to older Android versions (**Android 10–12**).
 
-*   **🎯 Per-App Security Patch Configuration**: Gain ultimate control by setting security patch levels on a per-package basis. Define a global default in `security_patch.txt` and override it for specific apps like `[com.google.android.gms]`. Moreover, your configuration is now alive! Use the `today` keyword to always report the current date, or create rolling dates with templates like `YYYY-MM-05`. Be sure to check README for more details.
-*   **🕰️ Full Software Emulation on Android 11**: We've implemented a complete, software-based key generation and attestation flow for the legacy `IKeystoreService` API, bringing full emulation capabilities to older devices.
+### 🛡️ Enhanced Keystore2 Emulation
+We have implemented critical APIs to support devices where the hardware TEE is broken or for applications configured to use key generation mode. These improvements directly address detection vectors identified in v3.0:
 
-#### 🛡️ **Stealth & Evasion Upgrades**
+*   **✅ Full Crypto Operations (`createOperation`)**: The simulator now correctly handles `SIGN`, `VERIFY`, `ENCRYPT`, and `DECRYPT` purposes for software-generated keys.
+*   **🔗 Certificate Chain Updates (`updateSubcomponent`)**: Added support for applications updating the certificate chain of virtual keys (e.g., via `KeyStore.setKeyEntry`).
+*   **📋 Enumeration Support (`listEntries`)**: Generated keys are now properly visible in enumeration APIs like `KeyStore.aliases()`, thanks to the implementation of `listEntries` and `listEntriesBatched`.
 
-*   **⛓️ Consistent Certificate Signatures**: Say goodbye to a major detection vector in `icu.nullptr.nativetest`. Patched certificates are now cached, ensuring that every request for a key returns a byte-for-byte identical certificate, just like a real TEE.
-*   **🔑 Authentic Device Properties**: To appear more genuine, the simulator now sources and uses your device's real `verifiedBootHash` and `moduleHash`, moving away from placeholder values.
-*   **📜 Structurally Sound Certificates**: The patching logic has been rewritten to be less intrusive. It now modifies the attestation extension in-place, preserving the original order of other extensions and preventing duplicates to avoid suspicion.
+### 🔧 Compatibility & Stability
+We’ve ironed out crashes and architecture-specific bugs to ensure a smooth experience across more devices:
 
-#### 🐛 **Bug Fixes & Reliability**
+*   **Android 10**: Fixed a crash caused by the missing `waitForService` method.
+*   **Android 11**: Implemented environment initialization and daemon UID spoofing to successfully bypass keystore generation permission checks.
+*   **ARM 32-bit (Android 12)**: Resolved `ptrace` compatibility issues by falling back to `PTRACE_GETREGS` and `PTRACE_SETREGS`.
+*   **x86_64 Emulators**: Enforced respect for the stack pointer "red zone" and added a staging fallback mechanism for file descriptor transfering of `libTEESimulator.so`.
 
-*   ✅ **Robust Crypto Engine**: Fixed critical crashes related to cryptographic provider conflicts. The signing logic is now more explicit and the KeyBox parser is more resilient against malformed files.
-*   ➡️ **Improved Compatibility**: Resolved a native crash on Android 11 devices.
+### 🚀 The Road Ahead
 
-#### 🚀 **The Road Ahead**
+We are aware of the remaining detection vectors (see the issues list) and have clear solutions mapped out for the next release.
 
-Our work to fix detection vectors and provide full support for TEE-broken devices and Android 10/11 is ongoing. We welcome your feedback! Please **report any issues** or **contribute a pull request** on our GitHub.
+Google's aggressive push for **Remote Key Provisioning (RKP)** and the drying up of leaked keyboxes is **not** the end for TEESimulator. Our ultimate goal remains unchanged: defeating Keystore attestation **without relying on a valid keybox**.
+
+We are inching closer to this milestone, but the fight for device freedom is complex and resource-intensive. Your patience and support (both time and financial) are vital as we conquer these new challenges.

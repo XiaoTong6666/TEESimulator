@@ -1,6 +1,6 @@
 {
-	"version": "v3.0",
-	"versionCode": 38,
-	"zipUrl": "https://github.com/JingMatrix/TEESimulator/releases/download/v3.0/TEESimulator-v3.0-38-Release.zip",
+	"version": "v3.1",
+	"versionCode": 59,
+	"zipUrl": "https://github.com/JingMatrix/TEESimulator/releases/download/v3.1/TEESimulator-v3.1-59-Release.zip",
 	"changelog": "https://raw.githubusercontent.com/JingMatrix/TEESimulator/main/module/changelog.md"
 }

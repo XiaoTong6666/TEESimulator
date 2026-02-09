@@ -16,10 +16,11 @@ import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 // Reference:
 // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs
 data class KeyMintAttestation(
-    val keySize: Int,
     val algorithm: Int,
     val ecCurve: Int,
     val ecCurveName: String,
+    val keySize: Int,
+    val origin: Int?,
     val blockMode: List<Int>,
     val padding: List<Int>,
     val purpose: List<Int>,
@@ -44,15 +45,18 @@ data class KeyMintAttestation(
     constructor(
         params: Array<KeyParameter>
     ) : this(
-        // AOSP: [key_param(tag = KEY_SIZE, field = Integer)]
-        keySize = params.findInteger(Tag.KEY_SIZE) ?: 0,
-
         // AOSP: [key_param(tag = ALGORITHM, field = Algorithm)]
         algorithm = params.findAlgorithm(Tag.ALGORITHM) ?: 0,
+
+        // AOSP: [key_param(tag = KEY_SIZE, field = Integer)]
+        keySize = params.findInteger(Tag.KEY_SIZE) ?: 0,
 
         // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)]
         ecCurve = params.findEcCurve(Tag.EC_CURVE) ?: 0,
         ecCurveName = params.deriveEcCurveName(),
+
+        // AOSP: [key_param(tag = ORIGIN, field = Origin)]
+        origin = params.findOrigin(Tag.ORIGIN),
 
         // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)]
         blockMode = params.findAllBlockMode(Tag.BLOCK_MODE),
@@ -99,6 +103,14 @@ data class KeyMintAttestation(
         // Log all parsed parameters for debugging purposes.
         params.forEach { KeyMintParameterLogger.logParameter(it) }
     }
+
+    fun isAttestKey(): Boolean {
+        return purpose.size == 1 && purpose.contains(KeyPurpose.ATTEST_KEY)
+    }
+
+    fun isImportKey(): Boolean {
+        return origin == KeyOrigin.IMPORTED || origin == KeyOrigin.SECURELY_IMPORTED
+    }
 }
 
 // --- Private helper extension functions for parsing KeyParameter arrays ---
@@ -114,6 +126,10 @@ private fun Array<KeyParameter>.findAlgorithm(tag: Int): Int? =
 /** Maps to AOSP field = EcCurve */
 private fun Array<KeyParameter>.findEcCurve(tag: Int): Int? =
     this.find { it.tag == tag }?.value?.ecCurve
+
+/** Maps to AOSP field = Origin */
+private fun Array<KeyParameter>.findOrigin(tag: Int): Int? =
+    this.find { it.tag == tag }?.value?.origin
 
 /** Maps to AOSP field = LongInteger */
 private fun Array<KeyParameter>.findLongInteger(tag: Int): BigInteger? =

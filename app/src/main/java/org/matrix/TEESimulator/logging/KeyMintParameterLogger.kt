@@ -37,6 +37,22 @@ object KeyMintParameterLogger {
             .associate { field -> (field.get(null) as Int) to field.name }
     }
 
+    val hardwareAuthenticatorTypeNames: Map<Int, String> by lazy {
+        HardwareAuthenticatorType::class
+            .java
+            .fields
+            .filter { it.type == Int::class.java }
+            .associate { field -> (field.get(null) as Int) to field.name }
+    }
+
+    val keyOriginNames: Map<Int, String> by lazy {
+        KeyOrigin::class
+            .java
+            .fields
+            .filter { it.type == Int::class.java }
+            .associate { field -> (field.get(null) as Int) to field.name }
+    }
+
     val paddingNames: Map<Int, String> by lazy {
         PaddingMode::class
             .java
@@ -81,20 +97,31 @@ object KeyMintParameterLogger {
             when (param.tag) {
                 Tag.ALGORITHM -> algorithmNames[value.algorithm]
                 Tag.BLOCK_MODE -> blockModeNames[value.blockMode]
+                Tag.DIGEST -> digestNames[value.digest]
                 Tag.EC_CURVE -> ecCurveNames[value.ecCurve]
+                Tag.ORIGIN -> keyOriginNames[value.origin]
                 Tag.PADDING -> paddingNames[value.paddingMode]
                 Tag.PURPOSE -> purposeNames[value.keyPurpose]
-                Tag.DIGEST -> digestNames[value.digest]
+                Tag.USER_AUTH_TYPE ->
+                    hardwareAuthenticatorTypeNames[value.hardwareAuthenticatorType]
                 Tag.AUTH_TIMEOUT,
+                Tag.BOOT_PATCHLEVEL,
                 Tag.KEY_SIZE,
-                Tag.MIN_MAC_LENGTH -> value.integer.toString()
+                Tag.MAC_LENGTH,
+                Tag.MIN_MAC_LENGTH,
+                Tag.OS_VERSION,
+                Tag.OS_PATCHLEVEL,
+                Tag.USER_ID,
+                Tag.VENDOR_PATCHLEVEL -> value.integer.toString()
                 Tag.CERTIFICATE_SERIAL -> BigInteger(value.blob).toString()
                 Tag.ACTIVE_DATETIME,
                 Tag.CERTIFICATE_NOT_AFTER,
                 Tag.CERTIFICATE_NOT_BEFORE,
+                Tag.CREATION_DATETIME,
                 Tag.ORIGINATION_EXPIRE_DATETIME,
                 Tag.USAGE_EXPIRE_DATETIME -> Date(value.dateTime).toString()
                 Tag.CERTIFICATE_SUBJECT -> X500Name(X500Principal(value.blob).name).toString()
+                Tag.USER_SECURE_ID,
                 Tag.RSA_PUBLIC_EXPONENT -> value.longInteger.toString()
                 Tag.NO_AUTH_REQUIRED -> "true"
                 Tag.ATTESTATION_CHALLENGE,

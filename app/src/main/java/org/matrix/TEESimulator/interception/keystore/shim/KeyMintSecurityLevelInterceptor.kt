@@ -2,7 +2,6 @@ package org.matrix.TEESimulator.interception.keystore.shim
 
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
-import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
@@ -146,6 +145,9 @@ class KeyMintSecurityLevelInterceptor(
             val metadata: KeyMetadata =
                 reply.readTypedObject(KeyMetadata.CREATOR)
                     ?: return TransactionResult.SkipTransaction
+            KeyMintAttestation(
+                metadata.authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
+            )
             val originalChain =
                 CertificateHelper.getCertificateChain(metadata)
                     ?: return TransactionResult.SkipTransaction
@@ -231,10 +233,7 @@ class KeyMintSecurityLevelInterceptor(
                 )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                val isAttestKeyRequest =
-                    parsedParams.purpose.size == 1 &&
-                        parsedParams.purpose.contains(KeyPurpose.ATTEST_KEY)
+                val isAttestKeyRequest = parsedParams.isAttestKey()
 
                 // Determine if we need to generate a key based on config or
                 // if it's an attestation request in patch mode.
@@ -260,6 +259,7 @@ class KeyMintSecurityLevelInterceptor(
                             securityLevel,
                         ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
+                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                     // It is unnecessary but a good practice to clean up possible caches
                     cleanupKeyData(keyId)
                     // Store the generated key data.
@@ -270,17 +270,15 @@ class KeyMintSecurityLevelInterceptor(
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
-                    return InterceptorUtils.createTypedObjectReply(response.metadata)
+                    InterceptorUtils.createTypedObjectReply(response.metadata)
                 } else if (parsedParams.attestationChallenge != null) {
-                    return TransactionResult.Continue
+                    TransactionResult.Continue
+                } else {
+                    TransactionResult.ContinueAndSkipPost
                 }
-
-                // If not generating, clear any stale state for this alias and let the call proceed.
-                cleanupKeyData(keyId)
-                TransactionResult.ContinueAndSkipPost
             }
             .getOrElse {
-                SystemLogger.error("Error during generateKey handling for UID $callingUid.", it)
+                SystemLogger.error("No key pair generated for UID $callingUid.", it)
                 TransactionResult.ContinueAndSkipPost
             }
     }
@@ -333,10 +331,10 @@ class KeyMintSecurityLevelInterceptor(
 
         // Stores keys generated entirely in software.
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
+        // A set to quickly identify keys that were generated for attestation purposes.
+        val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
         private val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
-        // A set to quickly identify keys that were generated for attestation purposes.
-        private val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Stores interceptors for active cryptographic operations.
         private val interceptedOperations = ConcurrentHashMap<IBinder, OperationInterceptor>()
 
@@ -401,8 +399,7 @@ class KeyMintSecurityLevelInterceptor(
 
 /**
  * Extension function to convert parsed `KeyMintAttestation` parameters back into an array of
- * `Authorization` objects for the fake `KeyMetadata`. This version correctly handles the
- * instantiation of Authorization objects.
+ * `Authorization` objects for the fake `KeyMetadata`.
  */
 private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Authorization> {
     val authList = mutableListOf<Authorization>()

@@ -192,14 +192,16 @@ object CertificateGenerator {
     private fun buildKeyUsageFromPurposes(purposes: List<Int>): Int {
         var bits = 0
         for (purpose in purposes) {
-            bits = bits or when (purpose) {
-                KeyPurpose.SIGN -> KeyUsage.digitalSignature
-                KeyPurpose.DECRYPT -> KeyUsage.dataEncipherment
-                KeyPurpose.WRAP_KEY -> KeyUsage.keyEncipherment
-                KeyPurpose.AGREE_KEY -> KeyUsage.keyAgreement
-                KeyPurpose.ATTEST_KEY -> KeyUsage.keyCertSign
-                else -> 0
-            }
+            bits =
+                bits or
+                    when (purpose) {
+                        KeyPurpose.SIGN -> KeyUsage.digitalSignature
+                        KeyPurpose.DECRYPT -> KeyUsage.dataEncipherment
+                        KeyPurpose.WRAP_KEY -> KeyUsage.keyEncipherment
+                        KeyPurpose.AGREE_KEY -> KeyUsage.keyAgreement
+                        KeyPurpose.ATTEST_KEY -> KeyUsage.keyCertSign
+                        else -> 0
+                    }
         }
         return bits
     }

@@ -104,6 +104,26 @@ data class KeyMintAttestation(
         params.forEach { KeyMintParameterLogger.logParameter(it) }
     }
 
+    /**
+     * Merges this set of parameters (typically operation parameters) with another set (typically
+     * the persisted key parameters). If a field is not specified in this instance (e.g., algorithm
+     * is 0), it takes the value from the [other] instance.
+     */
+    fun mergeWith(other: KeyMintAttestation): KeyMintAttestation {
+        return this.copy(
+            algorithm = if (this.algorithm != 0) this.algorithm else other.algorithm,
+            keySize = if (this.keySize != 0) this.keySize else other.keySize,
+            ecCurve = if (this.ecCurve != 0) this.ecCurve else other.ecCurve,
+            ecCurveName =
+                if (this.ecCurveName != "secp256r1" || other.ecCurveName != "secp256r1") {
+                    // If either is not the default, prefer the non-default one.
+                    // This is a bit simplified but covers the common cases.
+                    if (this.ecCurve != 0) this.ecCurveName else other.ecCurveName
+                } else "secp256r1",
+            rsaPublicExponent = this.rsaPublicExponent ?: other.rsaPublicExponent,
+        )
+    }
+
     fun isAttestKey(): Boolean {
         return purpose.size == 1 && purpose.contains(KeyPurpose.ATTEST_KEY)
     }

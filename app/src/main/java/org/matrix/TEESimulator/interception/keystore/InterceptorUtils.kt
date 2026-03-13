@@ -91,6 +91,14 @@ object InterceptorUtils {
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }
 
+    /** Creates an `OverrideReply` parcel that throws the supplied exception to the caller. */
+    fun createExceptionReply(
+        exception: Exception
+    ): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel = Parcel.obtain().apply { writeException(exception) }
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
+
     /**
      * Extracts the base alias from a potentially prefixed alias string. For example, it converts
      * "USRCERT_my_key" to "my_key".

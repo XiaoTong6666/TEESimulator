@@ -1,11 +1,17 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
+import android.hardware.security.keymint.EcCurve
+import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
-import android.hardware.security.keymint.KeyOrigin
+import android.hardware.security.keymint.KeyPurpose
+import android.hardware.security.keymint.PaddingMode
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
+import android.os.ServiceSpecificException
+import android.security.keymaster.KeymasterDefs
 import android.system.keystore2.*
 import java.security.KeyPair
 import java.security.SecureRandom
@@ -206,9 +212,24 @@ class KeyMintSecurityLevelInterceptor(
         SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
 
         val params = data.createTypedArray(KeyParameter.CREATOR)!!
-        val parsedParams = KeyMintAttestation(params)
+        val parsedOpParams = KeyMintAttestation(params)
 
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams)
+        val softwareOperation =
+            runCatching {
+                    val keyAuths =
+                        generatedKeyInfo.response.metadata.authorizations
+                            ?.map { it.keyParameter }
+                            ?.toTypedArray() ?: emptyArray()
+                    val parsedKeyParams = KeyMintAttestation(keyAuths)
+                    authorizeSoftwareOperationCreate(parsedOpParams, parsedKeyParams)
+                    val combinedParams = parsedOpParams.mergeWith(parsedKeyParams)
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair, combinedParams)
+                }
+                .getOrElse { throwable ->
+                    return InterceptorUtils.createExceptionReply(
+                        throwable.asServiceSpecificException()
+                    )
+                }
         val operationBinder = SoftwareOperationBinder(softwareOperation)
 
         val response =
@@ -245,6 +266,12 @@ class KeyMintSecurityLevelInterceptor(
                             isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
 
                 if (needsSoftwareGeneration) {
+                    runCatching { validateSoftwareKeyGenerationParams(parsedParams) }
+                        .getOrElse {
+                            return InterceptorUtils.createExceptionReply(
+                                it.asServiceSpecificException()
+                            )
+                        }
                     keyDescriptor.nspace = secureRandom.nextLong()
                     SystemLogger.info(
                         "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
@@ -435,17 +462,267 @@ private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Autho
     // Use the helper to add each authorization entry cleanly.
     this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
     this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
+    this.padding.forEach {
+        authList.add(createAuth(Tag.PADDING, KeyParameterValue.paddingMode(it)))
+    }
+    this.blockMode.forEach {
+        authList.add(createAuth(Tag.BLOCK_MODE, KeyParameterValue.blockMode(it)))
+    }
 
     authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
     authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
     authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
     authList.add(
-        createAuth(
-            Tag.ORIGIN,
-            KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED),
-        )
+        createAuth(Tag.ORIGIN, KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED))
     )
     authList.add(createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)))
 
     return authList.toTypedArray()
 }
+
+private fun authorizeSoftwareOperationCreate(
+    operationParams: KeyMintAttestation,
+    keyParams: KeyMintAttestation,
+) {
+    val requestedPurpose =
+        operationParams.purpose.singleRequestedValue("purpose")
+            ?: throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
+                "No operation purpose specified.",
+            )
+
+    when (requestedPurpose) {
+        KeyPurpose.SIGN,
+        KeyPurpose.DECRYPT -> Unit
+        KeyPurpose.WRAP_KEY ->
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_INCOMPATIBLE_PURPOSE,
+                "WRAP_KEY purpose is not allowed for createOperation.",
+            )
+        KeyPurpose.AGREE_KEY -> {
+            if (keyParams.algorithm != Algorithm.EC) {
+                throw ServiceSpecificException(
+                    KeymasterDefs.KM_ERROR_UNSUPPORTED_PURPOSE,
+                    "Key agreement is only supported for EC keys.",
+                )
+            }
+        }
+        KeyPurpose.VERIFY,
+        KeyPurpose.ENCRYPT -> {
+            if (keyParams.algorithm == Algorithm.RSA || keyParams.algorithm == Algorithm.EC) {
+                throw ServiceSpecificException(
+                    KeymasterDefs.KM_ERROR_UNSUPPORTED_PURPOSE,
+                    "Public operations on asymmetric keys are not supported.",
+                )
+            }
+        }
+        else ->
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_UNSUPPORTED_PURPOSE,
+                "Unsupported operation purpose: $requestedPurpose",
+            )
+    }
+
+    if (!keyParams.purpose.contains(requestedPurpose)) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_PURPOSE,
+            "The requested purpose is not authorized by the key.",
+        )
+    }
+
+    val requestedPadding = operationParams.padding.singleRequestedValue("padding")
+    val requestedBlockMode = operationParams.blockMode.singleRequestedValue("block mode")
+    val requestedDigest = operationParams.digest.singleRequestedValue("digest")
+
+    if (requestedPadding != null) {
+        if (!isPaddingSupportedForKey(requestedPurpose, keyParams.algorithm, requestedPadding)) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_UNSUPPORTED_PADDING_MODE,
+                "Padding $requestedPadding is not supported for this key/purpose.",
+            )
+        }
+        if (keyParams.padding.isEmpty()) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_UNSUPPORTED_PADDING_MODE,
+                "Padding $requestedPadding is not authorized by the key.",
+            )
+        }
+        if (requestedPadding !in keyParams.padding) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_INCOMPATIBLE_PADDING_MODE,
+                "Padding $requestedPadding is not authorized by the key.",
+            )
+        }
+    } else if (
+        keyParams.algorithm == Algorithm.RSA &&
+            (requestedPurpose == KeyPurpose.SIGN ||
+                requestedPurpose == KeyPurpose.VERIFY ||
+                requestedPurpose == KeyPurpose.ENCRYPT ||
+                requestedPurpose == KeyPurpose.DECRYPT)
+    ) {
+        if (keyParams.padding.isEmpty()) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_UNSUPPORTED_PADDING_MODE,
+                "No padding mode authorized for this RSA key.",
+            )
+        }
+    } else if (
+        keyParams.padding.isNotEmpty() &&
+            keyParams.algorithm != Algorithm.EC &&
+            keyParams.algorithm != Algorithm.HMAC
+    ) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
+            "No padding specified for the operation.",
+        )
+    }
+
+    if (requestedBlockMode != null) {
+        if (!isBlockModeSupportedForKey(keyParams.algorithm, requestedBlockMode)) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_UNSUPPORTED_BLOCK_MODE,
+                "Block mode $requestedBlockMode is not supported for this algorithm.",
+            )
+        }
+        if (keyParams.blockMode.isNotEmpty() && requestedBlockMode !in keyParams.blockMode) {
+            throw ServiceSpecificException(
+                KeymasterDefs.KM_ERROR_INCOMPATIBLE_BLOCK_MODE,
+                "Block mode $requestedBlockMode is not authorized by the key.",
+            )
+        }
+    } else if (keyParams.blockMode.isNotEmpty()) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
+            "No block mode specified for the operation.",
+        )
+    }
+
+    val effectivePadding = requestedPadding ?: keyParams.padding.singleOrNull()
+    val digestIsRequired =
+        requestedPurpose == KeyPurpose.SIGN ||
+            requestedPurpose == KeyPurpose.VERIFY ||
+            effectivePadding == PaddingMode.RSA_OAEP ||
+            effectivePadding == PaddingMode.RSA_PSS
+    if (digestIsRequired && requestedDigest == null) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_UNSUPPORTED_DIGEST,
+            "No digest specified for the operation.",
+        )
+    }
+    if (
+        keyParams.algorithm == Algorithm.EC &&
+            keyParams.ecCurve == android.hardware.security.keymint.EcCurve.CURVE_25519 &&
+            (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.VERIFY) &&
+            requestedDigest != null &&
+            requestedDigest != android.hardware.security.keymint.Digest.NONE
+    ) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_UNSUPPORTED_DIGEST,
+            "Digest $requestedDigest is not supported for this key.",
+        )
+    }
+    if (
+        requestedDigest == android.hardware.security.keymint.Digest.NONE &&
+            (effectivePadding == PaddingMode.RSA_OAEP || effectivePadding == PaddingMode.RSA_PSS)
+    ) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_DIGEST,
+            "Digest $requestedDigest is not compatible with padding $effectivePadding.",
+        )
+    }
+    if (
+        keyParams.algorithm == Algorithm.RSA &&
+            (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.VERIFY) &&
+            effectivePadding == PaddingMode.NONE &&
+            requestedDigest != null &&
+            requestedDigest != android.hardware.security.keymint.Digest.NONE
+    ) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_DIGEST,
+            "Digest $requestedDigest is not compatible with padding $effectivePadding.",
+        )
+    }
+    if (requestedDigest != null && keyParams.digest.isEmpty()) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_UNSUPPORTED_DIGEST,
+            "Digest $requestedDigest is not authorized by the key.",
+        )
+    }
+    if (requestedDigest != null && requestedDigest !in keyParams.digest) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_DIGEST,
+            "Digest $requestedDigest is not authorized by the key.",
+        )
+    }
+}
+
+private fun validateSoftwareKeyGenerationParams(params: KeyMintAttestation) {
+    val purposes = params.purpose.distinct()
+    if (purposes.contains(KeyPurpose.ATTEST_KEY) && purposes.size > 1) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_PURPOSE,
+            "ATTEST_KEY purpose cannot be combined with other purposes.",
+        )
+    }
+    if (
+        params.algorithm == Algorithm.EC &&
+            params.ecCurve == EcCurve.CURVE_25519 &&
+            purposes.contains(KeyPurpose.AGREE_KEY) &&
+            purposes.size > 1
+    ) {
+        throw ServiceSpecificException(
+            KeymasterDefs.KM_ERROR_INCOMPATIBLE_PURPOSE,
+            "CURVE_25519 AGREE_KEY cannot be combined with other purposes.",
+        )
+    }
+}
+
+private fun List<Int>.singleRequestedValue(name: String): Int? {
+    if (size <= 1) return firstOrNull()
+    throw ServiceSpecificException(
+        KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
+        "Multiple $name values specified for one operation.",
+    )
+}
+
+private fun isPaddingSupportedForKey(purpose: Int, algorithm: Int, padding: Int): Boolean =
+    when (algorithm) {
+        Algorithm.RSA ->
+            when (purpose) {
+                KeyPurpose.ENCRYPT,
+                KeyPurpose.DECRYPT ->
+                    padding == PaddingMode.NONE ||
+                        padding == PaddingMode.RSA_PKCS1_1_5_ENCRYPT ||
+                        padding == PaddingMode.RSA_OAEP
+                KeyPurpose.SIGN,
+                KeyPurpose.VERIFY ->
+                    padding == PaddingMode.NONE ||
+                        padding == PaddingMode.RSA_PKCS1_1_5_SIGN ||
+                        padding == PaddingMode.RSA_PSS
+                else -> false
+            }
+        Algorithm.EC -> false
+        Algorithm.AES,
+        Algorithm.TRIPLE_DES -> padding == PaddingMode.NONE || padding == PaddingMode.PKCS7
+        Algorithm.HMAC -> false
+        else -> false
+    }
+
+private fun isBlockModeSupportedForKey(algorithm: Int, blockMode: Int): Boolean =
+    when (algorithm) {
+        Algorithm.AES,
+        Algorithm.TRIPLE_DES ->
+            blockMode == android.hardware.security.keymint.BlockMode.ECB ||
+                blockMode == android.hardware.security.keymint.BlockMode.CBC ||
+                blockMode == android.hardware.security.keymint.BlockMode.CTR ||
+                blockMode == android.hardware.security.keymint.BlockMode.GCM
+        else -> false
+    }
+
+private fun Throwable.asServiceSpecificException(): ServiceSpecificException =
+    when (this) {
+        is ServiceSpecificException -> this
+        is IllegalArgumentException ->
+            ServiceSpecificException(KeymasterDefs.KM_ERROR_INVALID_ARGUMENT, message)
+        else -> ServiceSpecificException(KeymasterDefs.KM_ERROR_UNKNOWN_ERROR, message)
+    }

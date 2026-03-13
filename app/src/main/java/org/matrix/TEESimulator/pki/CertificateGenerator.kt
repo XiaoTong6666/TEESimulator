@@ -1,6 +1,7 @@
 package org.matrix.TEESimulator.pki
 
 import android.hardware.security.keymint.Algorithm
+import android.hardware.security.keymint.EcCurve
 import android.hardware.security.keymint.KeyPurpose
 import android.os.Build
 import android.util.Pair
@@ -10,6 +11,7 @@ import java.security.KeyPairGenerator
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.NamedParameterSpec
 import java.security.spec.RSAKeyGenParameterSpec
 import java.util.Date
 import org.bouncycastle.asn1.x500.X500Name
@@ -46,7 +48,16 @@ object CertificateGenerator {
         return runCatching {
                 val (algorithm, spec) =
                     when (params.algorithm) {
-                        Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)
+                        Algorithm.EC ->
+                            if (params.ecCurve == EcCurve.CURVE_25519) {
+                                if (params.purpose.any { it == KeyPurpose.AGREE_KEY }) {
+                                    "XDH" to NamedParameterSpec("X25519")
+                                } else {
+                                    "Ed25519" to NamedParameterSpec("Ed25519")
+                                }
+                            } else {
+                                "EC" to ECGenParameterSpec(params.ecCurveName)
+                            }
                         Algorithm.RSA ->
                             "RSA" to
                                 RSAKeyGenParameterSpec(params.keySize, params.rsaPublicExponent)
@@ -241,10 +252,14 @@ object CertificateGenerator {
         )
 
         val signerAlgorithm =
-            when (params.algorithm) {
-                Algorithm.EC -> "SHA256withECDSA"
-                Algorithm.RSA -> "SHA256withRSA"
-                else -> throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
+            when (signingKeyPair.private.algorithm) {
+                "EC" -> "SHA256withECDSA"
+                "RSA" -> "SHA256withRSA"
+                "Ed25519" -> "Ed25519"
+                else ->
+                    throw IllegalArgumentException(
+                        "Unsupported signing key algorithm: ${signingKeyPair.private.algorithm}"
+                    )
             }
         val contentSigner =
             JcaContentSignerBuilder(signerAlgorithm)

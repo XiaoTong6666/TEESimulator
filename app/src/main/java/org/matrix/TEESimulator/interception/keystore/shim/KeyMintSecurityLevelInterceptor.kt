@@ -2,6 +2,7 @@ package org.matrix.TEESimulator.interception.keystore.shim
 
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
@@ -291,12 +292,20 @@ class KeyMintSecurityLevelInterceptor(
         params: KeyMintAttestation,
         descriptor: KeyDescriptor,
     ): KeyEntryResponse {
+        val normalizedKeyDescriptor =
+            KeyDescriptor().apply {
+                domain = Domain.KEY_ID
+                nspace = descriptor.nspace
+                alias = null
+                blob = null
+            }
         val metadata =
             KeyMetadata().apply {
                 keySecurityLevel = securityLevel
-                key = descriptor
+                key = normalizedKeyDescriptor
                 CertificateHelper.updateCertificateChain(this, chain.toTypedArray()).getOrThrow()
                 authorizations = params.toAuthorizations(securityLevel)
+                modificationTimeMs = System.currentTimeMillis()
             }
         return KeyEntryResponse().apply {
             this.metadata = metadata
@@ -430,6 +439,12 @@ private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Autho
     authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
     authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
     authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
+    authList.add(
+        createAuth(
+            Tag.ORIGIN,
+            KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED),
+        )
+    )
     authList.add(createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)))
 
     return authList.toTypedArray()

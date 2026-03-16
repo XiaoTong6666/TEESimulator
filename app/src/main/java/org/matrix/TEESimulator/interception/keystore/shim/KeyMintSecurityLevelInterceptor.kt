@@ -6,6 +6,8 @@ import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
+import android.os.ServiceSpecificException
+import android.security.keymaster.KeymasterDefs
 import android.system.keystore2.*
 import java.security.KeyPair
 import java.security.SecureRandom
@@ -36,6 +38,7 @@ class KeyMintSecurityLevelInterceptor(
         val keyPair: KeyPair,
         val nspace: Long,
         val response: KeyEntryResponse,
+        val keyParameters: KeyMintAttestation,
     )
 
     override fun onPreTransact(
@@ -186,39 +189,51 @@ class KeyMintSecurityLevelInterceptor(
         callingUid: Int,
         data: Parcel,
     ): TransactionResult {
-        data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-        val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+        return runCatching {
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
-        // An operation must use the KEY_ID domain.
-        if (keyDescriptor.domain != Domain.KEY_ID) {
-            return TransactionResult.ContinueAndSkipPost
-        }
+                // An operation must use the KEY_ID domain.
+                if (keyDescriptor.domain != Domain.KEY_ID) {
+                    return TransactionResult.ContinueAndSkipPost
+                }
 
-        val nspace = keyDescriptor.nspace
-        val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
+                val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
+                if (generatedKeyInfo == null) {
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] Operation for unknown/hardware KeyId (${keyDescriptor.nspace}). Forwarding."
+                    )
+                    return TransactionResult.Continue
+                }
 
-        if (generatedKeyInfo == null) {
-            SystemLogger.debug(
-                "[TX_ID: $txId] Operation for unknown/hardware KeyId ($nspace). Forwarding."
-            )
-            return TransactionResult.Continue
-        }
+                SystemLogger.info(
+                    "[TX_ID: $txId] Creating SOFTWARE operation for KeyId ${keyDescriptor.nspace}."
+                )
 
-        SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
+                val params = data.createTypedArray(KeyParameter.CREATOR)!!
+                val parsedParams = KeyMintAttestation(params)
+                val resolvedParams =
+                    generatedKeyInfo.keyParameters.resolveForOperation(parsedParams)
 
-        val params = data.createTypedArray(KeyParameter.CREATOR)!!
-        val parsedParams = KeyMintAttestation(params)
+                val softwareOperation =
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair, resolvedParams)
+                val operationBinder = SoftwareOperationBinder(softwareOperation)
 
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams)
-        val operationBinder = SoftwareOperationBinder(softwareOperation)
+                val response =
+                    CreateOperationResponse().apply {
+                        iOperation = operationBinder
+                        operationChallenge = null
+                    }
 
-        val response =
-            CreateOperationResponse().apply {
-                iOperation = operationBinder
-                operationChallenge = null
+                InterceptorUtils.createTypedObjectReply(response)
             }
-
-        return InterceptorUtils.createTypedObjectReply(response)
+            .getOrElse { error ->
+                SystemLogger.warning(
+                    "[TX_ID: $txId] createOperation failed in software path.",
+                    error,
+                )
+                InterceptorUtils.createExceptionReply(error)
+            }
     }
 
     /**
@@ -273,7 +288,12 @@ class KeyMintSecurityLevelInterceptor(
                             keyDescriptor,
                         )
                     generatedKeys[keyId] =
-                        GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
+                        GeneratedKeyInfo(
+                            keyData.first,
+                            keyDescriptor.nspace,
+                            response,
+                            parsedParams,
+                        )
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
@@ -371,8 +391,9 @@ class KeyMintSecurityLevelInterceptor(
             // nspace).
             if (nspace == null || nspace == 0L) return null
             return generatedKeys.entries
-                .filter { (keyIdentifier, _) -> keyIdentifier.uid == callingUid }
-                .find { (_, info) -> info.nspace == nspace }
+                .find { (keyIdentifier, info) ->
+                    keyIdentifier.uid == callingUid && info.nspace == nspace
+                }
                 ?.value
         }
 
@@ -470,7 +491,6 @@ private fun KeyMintAttestation.toAuthorizations(
             createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(this.noAuthRequired))
         )
     }
-
     authList.add(
         createAuth(Tag.ORIGIN, KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED))
     )
@@ -502,4 +522,109 @@ private fun KeyMintAttestation.toAuthorizations(
     authList.add(createAuth(Tag.USER_ID, KeyParameterValue.integer(callingUid / 100000)))
 
     return authList.toTypedArray()
+}
+
+private fun KeyMintAttestation.resolveForOperation(
+    operationParams: KeyMintAttestation
+): KeyMintAttestation {
+    requireCompatible(
+        operationParams.purpose.isNotEmpty(),
+        KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
+        "No operation purpose specified",
+    )
+
+    val resolvedPurpose = operationParams.purpose.first()
+    requireCompatible(
+        resolvedPurpose in this.purpose,
+        KeymasterDefs.KM_ERROR_INCOMPATIBLE_PURPOSE,
+        "Requested purpose is not authorized by the key",
+    )
+
+    val resolvedDigest =
+        resolveSingleAuthorizedValue(
+            requested = operationParams.digest,
+            authorized = this.digest,
+            unsupportedErrorCode = KeymasterDefs.KM_ERROR_UNSUPPORTED_DIGEST,
+            incompatibleErrorCode = KeymasterDefs.KM_ERROR_INCOMPATIBLE_DIGEST,
+            valueLabel = "digest",
+            message = "Requested digest is not authorized by the key",
+        )
+
+    val resolvedPadding =
+        resolveSingleAuthorizedValue(
+            requested = operationParams.padding,
+            authorized = this.padding,
+            unsupportedErrorCode = KeymasterDefs.KM_ERROR_UNSUPPORTED_PADDING_MODE,
+            incompatibleErrorCode = KeymasterDefs.KM_ERROR_INCOMPATIBLE_PADDING_MODE,
+            valueLabel = "padding mode",
+            message = "Requested padding is not authorized by the key",
+        )
+
+    val resolvedBlockMode =
+        resolveSingleAuthorizedValue(
+            requested = operationParams.blockMode,
+            authorized = this.blockMode,
+            unsupportedErrorCode = KeymasterDefs.KM_ERROR_UNSUPPORTED_BLOCK_MODE,
+            incompatibleErrorCode = KeymasterDefs.KM_ERROR_INCOMPATIBLE_BLOCK_MODE,
+            valueLabel = "block mode",
+            message = "Requested block mode is not authorized by the key",
+        )
+
+    val resolvedAlgorithm =
+        when {
+            operationParams.algorithm == 0 -> this.algorithm
+            this.algorithm == 0 -> operationParams.algorithm
+            operationParams.algorithm == this.algorithm -> this.algorithm
+            else ->
+                throw ServiceSpecificException(
+                    KeymasterDefs.KM_ERROR_INCOMPATIBLE_ALGORITHM,
+                    "Requested algorithm does not match key algorithm",
+                )
+        }
+
+    return operationParams.copy(
+        algorithm = resolvedAlgorithm,
+        ecCurve = operationParams.ecCurve.takeIf { it != 0 } ?: this.ecCurve,
+        ecCurveName =
+            if (operationParams.ecCurve != 0 || operationParams.keySize != 0) {
+                operationParams.ecCurveName
+            } else {
+                this.ecCurveName
+            },
+        keySize = operationParams.keySize.takeIf { it != 0 } ?: this.keySize,
+        origin = this.origin ?: operationParams.origin,
+        blockMode = resolvedBlockMode,
+        padding = resolvedPadding,
+        purpose = listOf(resolvedPurpose),
+        digest = resolvedDigest,
+        rsaPublicExponent = operationParams.rsaPublicExponent ?: this.rsaPublicExponent,
+    )
+}
+
+private fun resolveSingleAuthorizedValue(
+    requested: List<Int>,
+    authorized: List<Int>,
+    unsupportedErrorCode: Int,
+    incompatibleErrorCode: Int,
+    valueLabel: String,
+    message: String,
+): List<Int> {
+    val requestedValue = requested.requireAtMostOneValue(unsupportedErrorCode, valueLabel)
+    if (requestedValue != null) {
+        requireCompatible(
+            authorized.isEmpty() || requestedValue in authorized,
+            incompatibleErrorCode,
+            message,
+        )
+        return listOf(requestedValue)
+    }
+
+    return authorized.requireAtMostOneValue(unsupportedErrorCode, valueLabel)?.let(::listOf)
+        ?: emptyList()
+}
+
+private fun requireCompatible(condition: Boolean, errorCode: Int, message: String) {
+    if (!condition) {
+        throw ServiceSpecificException(errorCode, message)
+    }
 }

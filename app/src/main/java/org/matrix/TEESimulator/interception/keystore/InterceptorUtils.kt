@@ -11,6 +11,10 @@ data class KeyIdentifier(val uid: Int, val alias: String)
 
 /** A collection of utility functions to support binder interception. */
 object InterceptorUtils {
+    private inline fun createOverrideReply(
+        writeToParcel: Parcel.() -> Unit
+    ): BinderInterceptor.TransactionResult.OverrideReply =
+        BinderInterceptor.TransactionResult.OverrideReply(Parcel.obtain().apply(writeToParcel))
 
     /**
      * Uses reflection to get the integer transaction code for a given method name from a Stub
@@ -44,67 +48,51 @@ object InterceptorUtils {
     /** Creates an `OverrideReply` parcel that indicates success with no data. */
     fun createSuccessReply(
         writeResultCode: Boolean = true
-    ): BinderInterceptor.TransactionResult.OverrideReply {
-        val parcel =
-            Parcel.obtain().apply {
-                writeNoException()
-                if (writeResultCode) {
-                    writeInt(KeyStore.NO_ERROR)
-                }
-            }
-        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    ): BinderInterceptor.TransactionResult.OverrideReply = createOverrideReply {
+        writeNoException()
+        if (writeResultCode) {
+            writeInt(KeyStore.NO_ERROR)
+        }
     }
 
     /** Creates an `OverrideReply` parcel containing a raw byte array. */
-    fun createByteArrayReply(data: ByteArray): BinderInterceptor.TransactionResult.OverrideReply {
-        val parcel =
-            Parcel.obtain().apply {
-                writeNoException()
-                writeByteArray(data)
-            }
-        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
-    }
+    fun createByteArrayReply(data: ByteArray): BinderInterceptor.TransactionResult.OverrideReply =
+        createOverrideReply {
+            writeNoException()
+            writeByteArray(data)
+        }
 
     /** Creates an `OverrideReply` parcel containing a typed array. */
     fun <T : Parcelable> createTypedArrayReply(
         array: Array<T>,
         flags: Int = 0,
-    ): BinderInterceptor.TransactionResult.OverrideReply {
-        val parcel =
-            Parcel.obtain().apply {
-                writeNoException()
-                writeTypedArray(array, flags)
-            }
-        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    ): BinderInterceptor.TransactionResult.OverrideReply = createOverrideReply {
+        writeNoException()
+        writeTypedArray(array, flags)
     }
 
     /** Creates an `OverrideReply` parcel containing a Parcelable object. */
     fun <T : Parcelable?> createTypedObjectReply(
         obj: T,
         flags: Int = 0,
-    ): BinderInterceptor.TransactionResult.OverrideReply {
-        val parcel =
-            Parcel.obtain().apply {
-                writeNoException()
-                writeTypedObject(obj, flags)
-            }
-        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    ): BinderInterceptor.TransactionResult.OverrideReply = createOverrideReply {
+        writeNoException()
+        writeTypedObject(obj, flags)
+    }
+
+    /** Creates an `OverrideReply` parcel containing a marshaled exception. */
+    fun createExceptionReply(
+        throwable: Throwable
+    ): BinderInterceptor.TransactionResult.OverrideReply = createOverrideReply {
+        writeException(throwable as? Exception ?: RuntimeException(throwable.message, throwable))
     }
 
     /**
      * Extracts the base alias from a potentially prefixed alias string. For example, it converts
      * "USRCERT_my_key" to "my_key".
      */
-    fun extractAlias(prefixedAlias: String): String {
-        val underscoreIndex = prefixedAlias.indexOf('_')
-        return if (underscoreIndex != -1) {
-            // Return the part of the string after the first underscore.
-            prefixedAlias.substring(underscoreIndex + 1)
-        } else {
-            // If there's no underscore, return the original string.
-            prefixedAlias
-        }
-    }
+    fun extractAlias(prefixedAlias: String): String =
+        prefixedAlias.substringAfter('_', prefixedAlias)
 
     /** Checks if a reply parcel contains an exception without consuming it. */
     fun hasException(reply: Parcel): Boolean {

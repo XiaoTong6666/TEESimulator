@@ -406,7 +406,7 @@ private data class LegacyKeygenParameters(
         // to be used by the legacy interceptor.
         return KeyMintAttestation(
             algorithm = this.algorithm,
-            ecCurve = 0, // Not explicitly available in legacy args, but not critical
+            ecCurve = null, // Legacy args do not provide EC_CURVE directly.
             ecCurveName = this.ecCurveName ?: "",
             keySize = this.keySize,
             origin = null, // Not needed to build attestaion

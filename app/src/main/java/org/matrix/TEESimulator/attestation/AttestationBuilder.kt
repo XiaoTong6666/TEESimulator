@@ -176,12 +176,37 @@ object AttestationBuilder {
                     AttestationConstants.TAG_KEY_SIZE,
                     ASN1Integer(params.keySize.toLong()),
                 ),
+            )
+
+        if (params.blockMode.isNotEmpty()) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_BLOCK_MODE,
+                    DERSet(params.blockMode.map { ASN1Integer(it.toLong()) }.toTypedArray()),
+                )
+            )
+        }
+
+        if (params.digest.isNotEmpty()) {
+            list.add(
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_DIGEST,
                     DERSet(params.digest.map { ASN1Integer(it.toLong()) }.toTypedArray()),
-                ),
+                )
             )
+        }
+
+        if (params.padding.isNotEmpty()) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_PADDING,
+                    DERSet(params.padding.map { ASN1Integer(it.toLong()) }.toTypedArray()),
+                )
+            )
+        }
 
         if (params.ecCurve != null) {
             list.add(
@@ -190,12 +215,6 @@ object AttestationBuilder {
                     AttestationConstants.TAG_EC_CURVE,
                     ASN1Integer(params.ecCurve.toLong()),
                 )
-            )
-        }
-
-        params.padding.forEach {
-            list.add(
-                DERTaggedObject(true, AttestationConstants.TAG_PADDING, ASN1Integer(it.toLong()))
             )
         }
 
@@ -210,19 +229,31 @@ object AttestationBuilder {
         }
 
         list.addAll(
-            listOf(
-                DERTaggedObject(true, AttestationConstants.TAG_NO_AUTH_REQUIRED, DERNull.INSTANCE),
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ORIGIN,
-                    ASN1Integer(0L),
-                ), // KeyOrigin.GENERATED
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ROOT_OF_TRUST,
-                    buildRootOfTrust(null),
-                ),
-            )
+            buildList {
+                if (params.noAuthRequired == true) {
+                    add(
+                        DERTaggedObject(
+                            true,
+                            AttestationConstants.TAG_NO_AUTH_REQUIRED,
+                            DERNull.INSTANCE,
+                        )
+                    )
+                }
+                add(
+                    DERTaggedObject(
+                        true,
+                        AttestationConstants.TAG_ORIGIN,
+                        ASN1Integer((params.origin ?: 0).toLong()),
+                    )
+                ) // KeyOrigin.GENERATED
+                add(
+                    DERTaggedObject(
+                        true,
+                        AttestationConstants.TAG_ROOT_OF_TRUST,
+                        buildRootOfTrust(null),
+                    )
+                )
+            }
         )
 
         // Use the same logic as getSimulatedHardwareProperties to conditionally add patch levels.

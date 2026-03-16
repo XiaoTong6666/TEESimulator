@@ -214,15 +214,16 @@ class KeyMintSecurityLevelInterceptor(
                 val parsedParams = KeyMintAttestation(params)
                 val resolvedParams =
                     generatedKeyInfo.keyParameters.resolveForOperation(parsedParams)
+                val authInfo = SoftwareAuthorizationManager.authorizeCreate(txId, generatedKeyInfo.keyParameters)
 
                 val softwareOperation =
-                    SoftwareOperation(txId, generatedKeyInfo.keyPair, resolvedParams)
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair, resolvedParams, authInfo)
                 val operationBinder = SoftwareOperationBinder(softwareOperation)
 
                 val response =
                     CreateOperationResponse().apply {
                         iOperation = operationBinder
-                        operationChallenge = null
+                        operationChallenge = authInfo.finalizeCreateAuthorization()
                     }
 
                 InterceptorUtils.createTypedObjectReply(response)
@@ -489,6 +490,36 @@ private fun KeyMintAttestation.toAuthorizations(
     if (this.noAuthRequired != null) {
         authList.add(
             createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(this.noAuthRequired))
+        )
+    }
+    if (this.hardwareAuthenticatorType != null) {
+        authList.add(
+            createAuth(
+                Tag.USER_AUTH_TYPE,
+                KeyParameterValue.hardwareAuthenticatorType(this.hardwareAuthenticatorType),
+            )
+        )
+    }
+    if (this.authTimeout != null) {
+        authList.add(createAuth(Tag.AUTH_TIMEOUT, KeyParameterValue.integer(this.authTimeout)))
+    }
+    this.userSecureIds.forEach {
+        authList.add(createAuth(Tag.USER_SECURE_ID, KeyParameterValue.longInteger(it)))
+    }
+    if (this.trustedConfirmationRequired != null) {
+        authList.add(
+            createAuth(
+                Tag.TRUSTED_CONFIRMATION_REQUIRED,
+                KeyParameterValue.boolValue(this.trustedConfirmationRequired),
+            )
+        )
+    }
+    if (this.unlockedDeviceRequired != null) {
+        authList.add(
+            createAuth(
+                Tag.UNLOCKED_DEVICE_REQUIRED,
+                KeyParameterValue.boolValue(this.unlockedDeviceRequired),
+            )
         )
     }
     authList.add(

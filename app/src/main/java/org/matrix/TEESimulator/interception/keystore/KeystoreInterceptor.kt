@@ -411,6 +411,11 @@ private data class LegacyKeygenParameters(
             keySize = this.keySize,
             origin = null, // Not needed to build attestaion
             noAuthRequired = null,
+            hardwareAuthenticatorType = null,
+            authTimeout = null,
+            userSecureIds = emptyList(),
+            trustedConfirmationRequired = null,
+            unlockedDeviceRequired = null,
             blockMode = listOf<Int>(),
             padding = listOf<Int>(),
             purpose = this.purpose,

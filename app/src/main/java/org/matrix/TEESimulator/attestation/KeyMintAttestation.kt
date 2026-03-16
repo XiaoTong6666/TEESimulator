@@ -22,6 +22,11 @@ data class KeyMintAttestation(
     val keySize: Int,
     val origin: Int?,
     val noAuthRequired: Boolean?,
+    val hardwareAuthenticatorType: Int?,
+    val authTimeout: Int?,
+    val userSecureIds: List<Long>,
+    val trustedConfirmationRequired: Boolean?,
+    val unlockedDeviceRequired: Boolean?,
     val blockMode: List<Int>,
     val padding: List<Int>,
     val purpose: List<Int>,
@@ -61,6 +66,21 @@ data class KeyMintAttestation(
 
         // AOSP: [key_param(tag = NO_AUTH_REQUIRED, field = BoolValue)]
         noAuthRequired = params.findBoolean(Tag.NO_AUTH_REQUIRED),
+
+        // AOSP: [key_param(tag = USER_AUTH_TYPE, field = HardwareAuthenticatorType)]
+        hardwareAuthenticatorType = params.findHardwareAuthenticatorType(Tag.USER_AUTH_TYPE),
+
+        // AOSP: [key_param(tag = AUTH_TIMEOUT, field = Integer)]
+        authTimeout = params.findInteger(Tag.AUTH_TIMEOUT),
+
+        // AOSP: [key_param(tag = USER_SECURE_ID, field = LongInteger)]
+        userSecureIds = params.findAllLongInteger(Tag.USER_SECURE_ID),
+
+        // AOSP: [key_param(tag = TRUSTED_CONFIRMATION_REQUIRED, field = BoolValue)]
+        trustedConfirmationRequired = params.findBoolean(Tag.TRUSTED_CONFIRMATION_REQUIRED),
+
+        // AOSP: [key_param(tag = UNLOCKED_DEVICE_REQUIRED, field = BoolValue)]
+        unlockedDeviceRequired = params.findBoolean(Tag.UNLOCKED_DEVICE_REQUIRED),
 
         // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)]
         blockMode = params.findAllBlockMode(Tag.BLOCK_MODE),
@@ -139,9 +159,17 @@ private fun Array<KeyParameter>.findEcCurve(tag: Int): Int? =
 private fun Array<KeyParameter>.findOrigin(tag: Int): Int? =
     this.find { it.tag == tag }?.value?.origin
 
+/** Maps to AOSP field = HardwareAuthenticatorType */
+private fun Array<KeyParameter>.findHardwareAuthenticatorType(tag: Int): Int? =
+    this.find { it.tag == tag }?.value?.hardwareAuthenticatorType
+
 /** Maps to AOSP field = LongInteger */
 private fun Array<KeyParameter>.findLongInteger(tag: Int): BigInteger? =
     this.find { it.tag == tag }?.value?.longInteger?.toBigInteger()
+
+/** Maps to AOSP field = LongInteger (Repeated) */
+private fun Array<KeyParameter>.findAllLongInteger(tag: Int): List<Long> =
+    this.filter { it.tag == tag }.map { it.value.longInteger }
 
 /** Maps to AOSP field = DateTime */
 private fun Array<KeyParameter>.findDate(tag: Int): Date? =

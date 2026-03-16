@@ -216,7 +216,12 @@ private class CipherPrimitive(
  * A software-only implementation of a cryptographic operation. This class acts as a controller,
  * delegating to a specific cryptographic primitive based on the operation's purpose.
  */
-class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMintAttestation) {
+internal class SoftwareOperation(
+    private val txId: Long,
+    keyPair: KeyPair,
+    params: KeyMintAttestation,
+    private val authInfo: SoftwareAuthInfo,
+) {
     private val primitive: CryptoPrimitive
     private val stateLock = Any()
     private var finalized = false
@@ -268,6 +273,7 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
             ensureActiveLocked()
             finalizeOperationLocked()
         }
+        SoftwareAuthorizationManager.onOperationFinished(authInfo)
         primitive.abort()
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] Operation aborted.")
     }
@@ -284,18 +290,26 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
         }
 
         return try {
+            if (markFinalized) {
+                authInfo.beforeFinish()
+            } else {
+                authInfo.beforeUpdate()
+            }
             val result = block()
             if (markFinalized) {
                 finalizeOperation()
+                SoftwareAuthorizationManager.onOperationFinished(authInfo)
                 SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
             }
             result
         } catch (e: ServiceSpecificException) {
             finalizeOperation()
+            SoftwareAuthorizationManager.onOperationFinished(authInfo)
             SystemLogger.warning("[SoftwareOp TX_ID: $txId] $name failed with service error.", e)
             throw e
         } catch (e: SignatureException) {
             finalizeOperation()
+            SoftwareAuthorizationManager.onOperationFinished(authInfo)
             SystemLogger.warning("[SoftwareOp TX_ID: $txId] $name failed with signature error.", e)
             throw ServiceSpecificException(
                 KeymasterDefs.KM_ERROR_VERIFICATION_FAILED,
@@ -303,6 +317,7 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
             )
         } catch (e: Exception) {
             finalizeOperation()
+            SoftwareAuthorizationManager.onOperationFinished(authInfo)
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to $name operation.", e)
             throw ServiceSpecificException(
                 KeymasterDefs.KM_ERROR_INVALID_ARGUMENT,
@@ -339,7 +354,7 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
 }
 
 /** The Binder interface for our [SoftwareOperation]. */
-class SoftwareOperationBinder(private val operation: SoftwareOperation) :
+internal class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
 
     @Throws(RemoteException::class)

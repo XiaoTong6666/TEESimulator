@@ -1,3 +1,5 @@
+android
+com.android.shell
 com.android.vending
 com.google.android.gms
 io.github.vvb2060.keyattestation

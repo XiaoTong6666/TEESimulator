@@ -231,11 +231,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
                         )
 
-                    if (parsedParameters.isImportKey()) {
-                        SystemLogger.info("[TX_ID: $txId] Skip patching for imported keys.")
-                        return TransactionResult.SkipTransaction
-                    }
-
                     if (parsedParameters.isAttestKey()) {
                         SystemLogger.warning(
                             "[TX_ID: $txId] Found hardware attest key ${keyId.alias} in the reply."

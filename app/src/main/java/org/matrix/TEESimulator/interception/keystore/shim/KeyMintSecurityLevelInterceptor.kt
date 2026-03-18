@@ -106,7 +106,26 @@ class KeyMintSecurityLevelInterceptor(
             val keyDescriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
-            cleanupKeyData(KeyIdentifier(callingUid, keyDescriptor.alias))
+            val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            cleanupKeyData(keyId)
+
+            // Patch imported key certificates the same way as generated keys.
+            if (!ConfigurationManager.shouldSkipUid(callingUid)) {
+                val metadata: KeyMetadata =
+                    reply.readTypedObject(KeyMetadata.CREATOR)
+                        ?: return TransactionResult.SkipTransaction
+                val originalChain = CertificateHelper.getCertificateChain(metadata)
+                if (originalChain != null && originalChain.size > 1) {
+                    val newChain =
+                        AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                    CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+                    metadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
+                    patchedChains[keyId] = newChain
+                    SystemLogger.debug("Cached patched certificate chain for imported key $keyId.")
+                    return InterceptorUtils.createTypedObjectReply(metadata)
+                }
+            }
         } else if (code == CREATE_OPERATION_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 

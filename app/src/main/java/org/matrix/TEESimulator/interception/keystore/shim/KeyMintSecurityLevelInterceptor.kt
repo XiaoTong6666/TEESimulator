@@ -57,7 +57,7 @@ class KeyMintSecurityLevelInterceptor(
             GENERATE_KEY_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-                if (!shouldSkip) return handleGenerateKey(callingUid, data)
+                if (!shouldSkip) return handleGenerateKey(callingUid, callingPid, data)
             }
             CREATE_OPERATION_TRANSACTION -> {
                 logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
@@ -387,7 +387,7 @@ class KeyMintSecurityLevelInterceptor(
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
      * either generates a key in software or lets the call pass through to the hardware.
      */
-    private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
+    private fun handleGenerateKey(callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
         return runCatching {
                 data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
@@ -422,6 +422,27 @@ class KeyMintSecurityLevelInterceptor(
                     return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
                         CANNOT_ATTEST_IDS
                     )
+                }
+
+                // INCLUDE_UNIQUE_ID requires SELinux gen_unique_id OR Android
+                // REQUEST_UNIQUE_ID_ATTESTATION (security_level.rs:478-485).
+                if (params.any { it.tag == Tag.INCLUDE_UNIQUE_ID }) {
+                    val hasSELinux =
+                        ConfigurationManager.checkSELinuxPermission(
+                            callingPid,
+                            "keystore_key",
+                            "gen_unique_id",
+                        )
+                    val hasAndroid =
+                        ConfigurationManager.hasPermissionForUid(
+                            callingUid,
+                            "android.permission.REQUEST_UNIQUE_ID_ATTESTATION",
+                        )
+                    if (!hasSELinux && !hasAndroid) {
+                        return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                            PERMISSION_DENIED
+                        )
+                    }
                 }
 
                 val parsedParams = KeyMintAttestation(params)
@@ -519,6 +540,7 @@ class KeyMintSecurityLevelInterceptor(
         private val secureRandom = SecureRandom()
 
         private const val INVALID_ARGUMENT = 20
+        private const val PERMISSION_DENIED = 6
         private const val CANNOT_ATTEST_IDS = -66
 
         // Transaction codes for IKeystoreSecurityLevel interface.

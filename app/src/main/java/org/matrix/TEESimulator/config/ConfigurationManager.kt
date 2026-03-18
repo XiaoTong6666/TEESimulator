@@ -352,6 +352,20 @@ object ConfigurationManager {
     }
 
     /** Checks if any package belonging to the UID holds the given permission. */
+    /** Checks a SELinux permission for a caller identified by PID against the keystore context. */
+    fun checkSELinuxPermission(callingPid: Int, tclass: String, perm: String): Boolean {
+        return try {
+            val callerCtx =
+                java.io.File("/proc/$callingPid/attr/current").readText().trim('\u0000', ' ', '\n')
+            val selfCtx =
+                java.io.File("/proc/self/attr/current").readText().trim('\u0000', ' ', '\n')
+            android.os.SELinux.checkSELinuxAccess(callerCtx, selfCtx, tclass, perm)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Checks if any package belonging to the UID holds the given permission. */
     fun hasPermissionForUid(uid: Int, permission: String): Boolean {
         val userId = uid / 100000
         return getPackagesForUid(uid).any { pkg ->

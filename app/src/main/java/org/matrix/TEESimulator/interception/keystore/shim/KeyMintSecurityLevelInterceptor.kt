@@ -155,7 +155,12 @@ class KeyMintSecurityLevelInterceptor(
                     val backdoor = getBackdoor(target)
                     if (backdoor != null) {
                         val interceptor = OperationInterceptor(operation, backdoor)
-                        register(backdoor, operationBinder, interceptor)
+                        register(
+                            backdoor,
+                            operationBinder,
+                            interceptor,
+                            OperationInterceptor.INTERCEPTED_CODES,
+                        )
                         interceptedOperations[operationBinder] = interceptor
                     } else {
                         SystemLogger.error(
@@ -521,6 +526,10 @@ class KeyMintSecurityLevelInterceptor(
                 IKeystoreSecurityLevel.Stub::class.java,
                 "createOperation",
             )
+
+        /** Only these transaction codes need native-level interception. */
+        val INTERCEPTED_CODES =
+            intArrayOf(GENERATE_KEY_TRANSACTION, IMPORT_KEY_TRANSACTION, CREATE_OPERATION_TRANSACTION)
 
         private val transactionNames: Map<Int, String> by lazy {
             IKeystoreSecurityLevel.Stub::class

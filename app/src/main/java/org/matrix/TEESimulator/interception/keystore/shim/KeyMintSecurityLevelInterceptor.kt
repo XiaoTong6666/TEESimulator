@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.keystore.shim
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
@@ -37,6 +38,7 @@ class KeyMintSecurityLevelInterceptor(
         val keyPair: KeyPair,
         val nspace: Long,
         val response: KeyEntryResponse,
+        val keyParams: KeyMintAttestation,
     )
 
     override fun onPreTransact(
@@ -228,33 +230,107 @@ class KeyMintSecurityLevelInterceptor(
 
         SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
 
-        val params = data.createTypedArray(KeyParameter.CREATOR)!!
-        val parsedParams = KeyMintAttestation(params)
+        val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
+        val parsedOpParams = KeyMintAttestation(opParams)
+        val forced = data.readBoolean()
 
-        // Validate the requested purpose against the key's allowed purposes,
-        // matching AOSP enforcements.rs authorize_create behavior.
-        val requestedPurpose = parsedParams.purpose.firstOrNull()
-        val keyResponse = generatedKeyInfo.response
-        val keyAuthorizations =
-            keyResponse.metadata?.authorizations?.map { it.keyParameter.tag to it.keyParameter }
-        val allowedPurposes =
-            keyAuthorizations
-                ?.filter { it.first == Tag.PURPOSE }
-                ?.map { it.second.value.keyPurpose }
-                ?: emptyList()
+        // --- AOSP enforcements.rs authorize_create() equivalent ---
+        val keyParams = generatedKeyInfo.keyParams
 
-        if (requestedPurpose != null && requestedPurpose !in allowedPurposes) {
+        // F14: Missing PURPOSE → INVALID_ARGUMENT (-38)
+        val requestedPurpose = parsedOpParams.purpose.firstOrNull()
+        if (requestedPurpose == null) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.INVALID_ARGUMENT
+            )
+        }
+
+        // F9: Forced op without permission → PERMISSION_DENIED (6)
+        if (forced) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.PERMISSION_DENIED
+            )
+        }
+
+        // F1: PURPOSE not in key's allowed purposes → INCOMPATIBLE_PURPOSE (-3)
+        if (requestedPurpose !in keyParams.purpose) {
             SystemLogger.info(
-                "[TX_ID: $txId] Rejecting operation: purpose $requestedPurpose not in $allowedPurposes"
+                "[TX_ID: $txId] Rejecting: purpose $requestedPurpose not in ${keyParams.purpose}"
             )
             return InterceptorUtils.createServiceSpecificErrorReply(
                 KeystoreErrorCode.INCOMPATIBLE_PURPOSE
             )
         }
 
+        // F4: ACTIVE_DATETIME — KEY_NOT_YET_VALID (-24)
+        keyParams.activeDateTime?.let { activeDate ->
+            if (System.currentTimeMillis() < activeDate.time) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_NOT_YET_VALID
+                )
+            }
+        }
+
+        // F2: ORIGINATION_EXPIRE_DATETIME — KEY_EXPIRED (-25) for SIGN/ENCRYPT only
+        keyParams.originationExpireDateTime?.let { expireDate ->
+            if (
+                (requestedPurpose == KeyPurpose.SIGN ||
+                    requestedPurpose == KeyPurpose.ENCRYPT) &&
+                    System.currentTimeMillis() > expireDate.time
+            ) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_EXPIRED
+                )
+            }
+        }
+
+        // F3: USAGE_EXPIRE_DATETIME — KEY_EXPIRED (-25) for DECRYPT/VERIFY only
+        keyParams.usageExpireDateTime?.let { expireDate ->
+            if (
+                (requestedPurpose == KeyPurpose.DECRYPT ||
+                    requestedPurpose == KeyPurpose.VERIFY) &&
+                    System.currentTimeMillis() > expireDate.time
+            ) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_EXPIRED
+                )
+            }
+        }
+
+        // F7: CALLER_NONCE — CALLER_NONCE_PROHIBITED (-55)
+        if (
+            (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.ENCRYPT) &&
+                keyParams.callerNonce != true &&
+                opParams.any { it.tag == Tag.NONCE }
+        ) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.CALLER_NONCE_PROHIBITED
+            )
+        }
+
         return runCatching {
                 val softwareOperation =
-                    SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams)
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedOpParams)
+
+                // F11: USAGE_COUNT_LIMIT — decrement on finish, delete key when exhausted
+                keyParams.usageCountLimit?.let { limit ->
+                    val keyId =
+                        generatedKeys.entries
+                            .find { it.value === generatedKeyInfo }
+                            ?.key ?: return@let
+                    val remaining =
+                        usageCounters.getOrPut(keyId) {
+                            java.util.concurrent.atomic.AtomicInteger(limit)
+                        }
+                    softwareOperation.onFinishCallback = {
+                        if (remaining.decrementAndGet() <= 0) {
+                            cleanupKeyData(keyId)
+                            usageCounters.remove(keyId)
+                            SystemLogger.info("Key $keyId exhausted (USAGE_COUNT_LIMIT=$limit).")
+                        }
+                    }
+                }
+
                 val operationBinder = SoftwareOperationBinder(softwareOperation)
 
                 val response =
@@ -336,7 +412,12 @@ class KeyMintSecurityLevelInterceptor(
                             keyDescriptor,
                         )
                     generatedKeys[keyId] =
-                        GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
+                        GeneratedKeyInfo(
+                            keyData.first,
+                            keyDescriptor.nspace,
+                            response,
+                            parsedParams,
+                        )
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
@@ -417,6 +498,9 @@ class KeyMintSecurityLevelInterceptor(
         val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
         val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
+        // Tracks remaining usage count per key for USAGE_COUNT_LIMIT enforcement.
+        private val usageCounters =
+            ConcurrentHashMap<KeyIdentifier, java.util.concurrent.atomic.AtomicInteger>()
         // Stores interceptors for active cryptographic operations.
         private val interceptedOperations = ConcurrentHashMap<IBinder, OperationInterceptor>()
 
@@ -456,6 +540,7 @@ class KeyMintSecurityLevelInterceptor(
             if (attestationKeys.remove(keyId)) {
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
+            usageCounters.remove(keyId)
         }
 
         fun removeOperationInterceptor(operationBinder: IBinder, backdoor: IBinder) {
@@ -474,6 +559,7 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys.clear()
             patchedChains.clear()
             attestationKeys.clear()
+            usageCounters.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }

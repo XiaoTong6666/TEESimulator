@@ -213,22 +213,30 @@ class KeyMintSecurityLevelInterceptor(
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
-        // An operation must use the KEY_ID domain.
-        if (keyDescriptor.domain != Domain.KEY_ID) {
-            return TransactionResult.ContinueAndSkipPost
-        }
-
-        val nspace = keyDescriptor.nspace
-        val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
+        // AOSP createOperation accepts Domain::APP (alias), Domain::KEY_ID (nspace),
+        // Domain::SELINUX, and Domain::BLOB. Resolve to our generated key by trying
+        // both alias-based and nspace-based lookups.
+        val generatedKeyInfo =
+            when (keyDescriptor.domain) {
+                Domain.KEY_ID -> findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
+                Domain.APP ->
+                    keyDescriptor.alias?.let { alias ->
+                        generatedKeys[KeyIdentifier(callingUid, alias)]
+                    }
+                else -> null
+            }
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
-                "[TX_ID: $txId] Operation for unknown/hardware KeyId ($nspace). Forwarding."
+                "[TX_ID: $txId] Operation for unknown/hardware key (domain=${keyDescriptor.domain}, " +
+                    "alias=${keyDescriptor.alias}, nspace=${keyDescriptor.nspace}). Forwarding."
             )
             return TransactionResult.Continue
         }
 
-        SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
+        SystemLogger.info(
+            "[TX_ID: $txId] Creating SOFTWARE operation for key ${generatedKeyInfo.nspace}."
+        )
 
         val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedOpParams = KeyMintAttestation(opParams)

@@ -213,27 +213,40 @@ class KeyMintSecurityLevelInterceptor(
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
-        // An operation must use the KEY_ID domain.
-        if (keyDescriptor.domain != Domain.KEY_ID) {
-            return TransactionResult.ContinueAndSkipPost
-        }
-
-        val nspace = keyDescriptor.nspace
-        val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
-        val resolvedKeyId =
-            generatedKeys.entries
-                .filter { it.key.uid == callingUid }
-                .find { it.value.nspace == nspace }
-                ?.key
+        // AOSP createOperation accepts Domain::APP (alias), Domain::KEY_ID (nspace),
+        // Domain::SELINUX, and Domain::BLOB. Resolve to our generated key by trying
+        // both alias-based and nspace-based lookups (database.rs: l=2060, 2123).
+        val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo>? =
+            when (keyDescriptor.domain) {
+                Domain.KEY_ID -> {
+                    val nspace = keyDescriptor.nspace
+                    if (nspace == 0L) null
+                    else
+                        generatedKeys.entries
+                            .filter { it.key.uid == callingUid }
+                            .find { it.value.nspace == nspace }
+                }
+                Domain.APP ->
+                    keyDescriptor.alias?.let { alias ->
+                        val key = KeyIdentifier(callingUid, alias)
+                        generatedKeys[key]?.let { java.util.AbstractMap.SimpleEntry(key, it) }
+                    }
+                else -> null
+            }
+        val generatedKeyInfo = resolvedEntry?.value
+        val resolvedKeyId = resolvedEntry?.key
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
-                "[TX_ID: $txId] Operation for unknown/hardware KeyId ($nspace). Forwarding."
+                "[TX_ID: $txId] Operation for unknown/hardware key (domain=${keyDescriptor.domain}, " +
+                    "alias=${keyDescriptor.alias}, nspace=${keyDescriptor.nspace}). Forwarding."
             )
             return TransactionResult.Continue
         }
 
-        SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
+        SystemLogger.info(
+            "[TX_ID: $txId] Creating SOFTWARE operation for key ${generatedKeyInfo.nspace}."
+        )
 
         val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedOpParams = KeyMintAttestation(opParams)
@@ -252,9 +265,8 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         val algorithm = keyParams.algorithm
-        val isAsymmetric = algorithm == Algorithm.EC || algorithm == Algorithm.RSA
         if (
-            isAsymmetric &&
+            (algorithm == Algorithm.EC || algorithm == Algorithm.RSA) &&
                 (requestedPurpose == KeyPurpose.VERIFY || requestedPurpose == KeyPurpose.ENCRYPT)
         ) {
             return InterceptorUtils.createServiceSpecificErrorReply(

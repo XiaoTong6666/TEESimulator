@@ -56,6 +56,7 @@ object AttestationConstants {
     const val TAG_NO_AUTH_REQUIRED = 503
     const val TAG_USER_AUTH_TYPE = 504
     const val TAG_AUTH_TIMEOUT = 505
+    const val TAG_UNLOCKED_DEVICE_REQUIRED = 509
 
     // --- Attestation and Application Info ---
     const val TAG_APPLICATION_ID = 601

@@ -313,6 +313,58 @@ object AttestationBuilder {
                 )
             }
         }
+        // Add enforcement-related tags that are reflected in the attestation.
+        if (params.callerNonce == true) {
+            list.add(
+                DERTaggedObject(true, AttestationConstants.TAG_CALLER_NONCE, DERNull.INSTANCE)
+            )
+        }
+        params.activeDateTime?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ACTIVE_DATETIME,
+                    ASN1Integer(it.time),
+                )
+            )
+        }
+        params.originationExpireDateTime?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ORIGINATION_EXPIRE_DATETIME,
+                    ASN1Integer(it.time),
+                )
+            )
+        }
+        params.usageExpireDateTime?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_USAGE_EXPIRE_DATETIME,
+                    ASN1Integer(it.time),
+                )
+            )
+        }
+        params.usageCountLimit?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_USAGE_COUNT_LIMIT,
+                    ASN1Integer(it.toLong()),
+                )
+            )
+        }
+        if (params.unlockedDeviceRequired == true) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_UNLOCKED_DEVICE_REQUIRED,
+                    DERNull.INSTANCE,
+                )
+            )
+        }
+
         return DERSequence(list.sortedBy { (it as DERTaggedObject).tagNo }.toTypedArray())
     }
 

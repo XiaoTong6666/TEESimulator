@@ -8,7 +8,6 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.cert.Certificate
-import java.security.cert.X509Certificate
 import java.security.interfaces.ECKey
 import java.security.interfaces.RSAKey
 import java.security.spec.ECGenParameterSpec

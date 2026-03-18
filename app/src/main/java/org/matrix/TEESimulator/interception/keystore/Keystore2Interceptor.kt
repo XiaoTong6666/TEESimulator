@@ -256,6 +256,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                                 keyData.second.toTypedArray(),
                             )
                             .getOrThrow()
+                        response.metadata.authorizations =
+                            InterceptorUtils.patchAuthorizations(
+                                response.metadata.authorizations,
+                                callingUid,
+                            )
 
                         val key = response.metadata.key!!
                         key.nspace = SecureRandom().nextLong()
@@ -308,6 +313,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             finalChain,
                         )
                         .getOrThrow()
+                    response.metadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(
+                            response.metadata.authorizations,
+                            callingUid,
+                        )
 
                     return InterceptorUtils.createTypedObjectReply(response)
                 }

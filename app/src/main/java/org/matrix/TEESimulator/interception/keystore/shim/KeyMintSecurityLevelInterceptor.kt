@@ -12,6 +12,7 @@ import java.security.KeyPair
 import java.security.SecureRandom
 import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.SecretKey
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -34,10 +35,18 @@ class KeyMintSecurityLevelInterceptor(
 
     // --- Data Structures for State Management ---
     data class GeneratedKeyInfo(
-        val keyPair: KeyPair,
+        val keyPair: KeyPair?,
+        val secretKey: SecretKey?,
         val nspace: Long,
         val response: KeyEntryResponse,
-    )
+        val params: KeyMintAttestation,
+    ) {
+        constructor(
+            keyPair: KeyPair?,
+            nspace: Long,
+            response: KeyEntryResponse,
+        ) : this(keyPair, null, nspace, response, KeyMintAttestation(emptyArray()))
+    }
 
     override fun onPreTransact(
         txId: Long,
@@ -164,6 +173,8 @@ class KeyMintSecurityLevelInterceptor(
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(callingUid, metadata, newChain)
                     .getOrThrow()
+                metadata.authorizations =
+                    InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
 
                 // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
@@ -211,7 +222,7 @@ class KeyMintSecurityLevelInterceptor(
         val params = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedParams = KeyMintAttestation(params)
 
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedParams)
+        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair!!, parsedParams)
         val operationBinder = SoftwareOperationBinder(softwareOperation)
 
         val response =

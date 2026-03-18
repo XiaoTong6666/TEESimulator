@@ -215,15 +215,25 @@ class KeyMintSecurityLevelInterceptor(
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
         // Resolve key descriptor to a generated key via nspace (KEY_ID) or alias (APP).
-        val generatedKeyInfo =
+        val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo>? =
             when (keyDescriptor.domain) {
-                Domain.KEY_ID -> findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
+                Domain.KEY_ID -> {
+                    val nspace = keyDescriptor.nspace
+                    if (nspace == null || nspace == 0L) null
+                    else
+                        generatedKeys.entries
+                            .filter { it.key.uid == callingUid }
+                            .find { it.value.nspace == nspace }
+                }
                 Domain.APP ->
                     keyDescriptor.alias?.let { alias ->
-                        generatedKeys[KeyIdentifier(callingUid, alias)]
+                        val key = KeyIdentifier(callingUid, alias)
+                        generatedKeys[key]?.let { java.util.AbstractMap.SimpleEntry(key, it) }
                     }
                 else -> null
             }
+        val generatedKeyInfo = resolvedEntry?.value
+        val resolvedKeyId = resolvedEntry?.key
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
@@ -321,30 +331,29 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         return runCatching {
+                // Use key params for crypto properties (algorithm, digest, etc.) but
+                // override purpose from the operation params.
+                val effectiveParams =
+                    keyParams.copy(purpose = parsedOpParams.purpose, digest = parsedOpParams.digest.ifEmpty { keyParams.digest })
                 val softwareOperation =
-                    SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedOpParams)
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair, effectiveParams)
 
                 // Decrement usage counter on finish; delete key when exhausted.
-                keyParams.usageCountLimit?.let { limit ->
-                    val keyId =
-                        generatedKeys.entries
-                            .find { it.value.nspace == generatedKeyInfo.nspace }
-                            ?.key ?: return@let
+                if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
+                    val limit = keyParams.usageCountLimit
                     val remaining =
-                        usageCounters.getOrPut(keyId) {
+                        usageCounters.getOrPut(resolvedKeyId) {
                             java.util.concurrent.atomic.AtomicInteger(limit)
                         }
-                    // Check if already exhausted before creating the operation
                     if (remaining.get() <= 0) {
-                        cleanupKeyData(keyId)
-                        usageCounters.remove(keyId)
+                        cleanupKeyData(resolvedKeyId)
+                        usageCounters.remove(resolvedKeyId)
                         throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
                     }
                     softwareOperation.onFinishCallback = {
                         if (remaining.decrementAndGet() <= 0) {
-                            cleanupKeyData(keyId)
-                            usageCounters.remove(keyId)
-                            SystemLogger.info("Key $keyId exhausted (USAGE_COUNT_LIMIT=$limit).")
+                            cleanupKeyData(resolvedKeyId)
+                            usageCounters.remove(resolvedKeyId)
                         }
                     }
                 }
@@ -387,6 +396,21 @@ class KeyMintSecurityLevelInterceptor(
                 if (params.any { it.tag == Tag.CREATION_DATETIME }) {
                     return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
                         INVALID_ARGUMENT
+                    )
+                }
+
+                // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE which
+                // normal apps lack.
+                if (
+                    params.any {
+                        it.tag == Tag.ATTESTATION_ID_SERIAL ||
+                            it.tag == Tag.ATTESTATION_ID_IMEI ||
+                            it.tag == Tag.ATTESTATION_ID_MEID ||
+                            it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
+                    }
+                ) {
+                    return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                        CANNOT_ATTEST_IDS
                     )
                 }
 
@@ -485,6 +509,7 @@ class KeyMintSecurityLevelInterceptor(
         private val secureRandom = SecureRandom()
 
         private const val INVALID_ARGUMENT = 20
+        private const val CANNOT_ATTEST_IDS = -66
 
         // Transaction codes for IKeystoreSecurityLevel interface.
         private val GENERATE_KEY_TRANSACTION =

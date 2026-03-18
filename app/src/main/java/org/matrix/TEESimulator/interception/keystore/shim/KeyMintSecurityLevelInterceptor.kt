@@ -500,9 +500,12 @@ class KeyMintSecurityLevelInterceptor(
                     TransactionResult.ContinueAndSkipPost
                 }
             }
-            .getOrElse {
-                SystemLogger.error("No key pair generated for UID $callingUid.", it)
-                TransactionResult.ContinueAndSkipPost
+            .getOrElse { e ->
+                SystemLogger.error("No key pair generated for UID $callingUid.", e)
+                val code =
+                    if (e is android.os.ServiceSpecificException) e.errorCode
+                    else SECURE_HW_COMMUNICATION_FAILED
+                InterceptorUtils.createServiceSpecificErrorReply(code)
             }
     }
 
@@ -541,6 +544,7 @@ class KeyMintSecurityLevelInterceptor(
 
         private const val INVALID_ARGUMENT = 20
         private const val PERMISSION_DENIED = 6
+        private const val SECURE_HW_COMMUNICATION_FAILED = -49
         private const val CANNOT_ATTEST_IDS = -66
 
         // Transaction codes for IKeystoreSecurityLevel interface.

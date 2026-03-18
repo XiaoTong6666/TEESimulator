@@ -1,8 +1,10 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
@@ -39,8 +41,15 @@ class KeyMintSecurityLevelInterceptor(
         val secretKey: SecretKey?,
         val nspace: Long,
         val response: KeyEntryResponse,
-        val params: KeyMintAttestation,
+        val keyParams: KeyMintAttestation,
     ) {
+        constructor(
+            keyPair: KeyPair?,
+            nspace: Long,
+            response: KeyEntryResponse,
+            keyParams: KeyMintAttestation,
+        ) : this(keyPair, null, nspace, response, keyParams)
+
         constructor(
             keyPair: KeyPair?,
             nspace: Long,
@@ -193,6 +202,8 @@ class KeyMintSecurityLevelInterceptor(
      * Handles the `createOperation` transaction. It checks if the operation is for a key that was
      * generated in software. If so, it creates a software-based operation handler. Otherwise, it
      * lets the call proceed to the real hardware service.
+     *
+     * References: enforcements.rs: l=382 security_level.rs: l=402
      */
     private fun handleCreateOperation(
         txId: Long,
@@ -209,6 +220,11 @@ class KeyMintSecurityLevelInterceptor(
 
         val nspace = keyDescriptor.nspace
         val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
+        val resolvedKeyId =
+            generatedKeys.entries
+                .filter { it.key.uid == callingUid }
+                .find { it.value.nspace == nspace }
+                ?.key
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
@@ -219,22 +235,144 @@ class KeyMintSecurityLevelInterceptor(
 
         SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
 
-        val params = data.createTypedArray(KeyParameter.CREATOR)!!
-        val parsedParams = KeyMintAttestation(params)
+        val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
+        val parsedOpParams = KeyMintAttestation(opParams)
+        data.readBoolean() // forced: no-op for software operations
 
-        val softwareOperation = SoftwareOperation(txId, generatedKeyInfo.keyPair!!, parsedParams)
-        val operationBinder = SoftwareOperationBinder(softwareOperation)
+        // AOSP authorize_create parity for purpose checks, date validity, caller nonce,
+        // and deferred USAGE_COUNT_LIMIT accounting (enforcements.rs: l=382).
+        val keyParams = generatedKeyInfo.keyParams
 
-        val response =
-            CreateOperationResponse().apply {
-                iOperation = operationBinder
-                operationChallenge = null
-                // AOSP forwards begin_result.params into CreateOperationResponse.parameters.
-                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
-                parameters = softwareOperation.beginParameters
+        // F14: Missing PURPOSE → INVALID_ARGUMENT (-38)
+        val requestedPurpose = parsedOpParams.purpose.firstOrNull()
+        if (requestedPurpose == null) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.INVALID_ARGUMENT
+            )
+        }
+
+        val algorithm = keyParams.algorithm
+        val isAsymmetric = algorithm == Algorithm.EC || algorithm == Algorithm.RSA
+        if (
+            isAsymmetric &&
+                (requestedPurpose == KeyPurpose.VERIFY || requestedPurpose == KeyPurpose.ENCRYPT)
+        ) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.UNSUPPORTED_PURPOSE
+            )
+        }
+
+        // F1: PURPOSE not in key's allowed purposes → INCOMPATIBLE_PURPOSE (-3)
+        if (requestedPurpose !in keyParams.purpose) {
+            SystemLogger.info(
+                "[TX_ID: $txId] Rejecting: purpose $requestedPurpose not in ${keyParams.purpose}"
+            )
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.INCOMPATIBLE_PURPOSE
+            )
+        }
+
+        // F4: ACTIVE_DATETIME — KEY_NOT_YET_VALID (-24)
+        keyParams.activeDateTime?.let { activeDate ->
+            if (System.currentTimeMillis() < activeDate.time) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_NOT_YET_VALID
+                )
             }
+        }
 
-        return InterceptorUtils.createTypedObjectReply(response)
+        // F2: ORIGINATION_EXPIRE_DATETIME — KEY_EXPIRED (-25) for SIGN/ENCRYPT only
+        // enforcements.rs: l=487
+        keyParams.originationExpireDateTime?.let { expireDate ->
+            if (
+                (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.ENCRYPT) &&
+                    System.currentTimeMillis() > expireDate.time
+            ) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_EXPIRED
+                )
+            }
+        }
+
+        // F3: USAGE_EXPIRE_DATETIME — KEY_EXPIRED (-25) for DECRYPT/VERIFY only
+        // enforcements.rs: l=494
+        keyParams.usageExpireDateTime?.let { expireDate ->
+            if (
+                (requestedPurpose == KeyPurpose.DECRYPT || requestedPurpose == KeyPurpose.VERIFY) &&
+                    System.currentTimeMillis() > expireDate.time
+            ) {
+                return InterceptorUtils.createServiceSpecificErrorReply(
+                    KeystoreErrorCode.KEY_EXPIRED
+                )
+            }
+        }
+
+        // F7: CALLER_NONCE — CALLER_NONCE_PROHIBITED (-55)
+        if (
+            (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.ENCRYPT) &&
+                keyParams.callerNonce != true &&
+                opParams.any { it.tag == Tag.NONCE }
+        ) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.CALLER_NONCE_PROHIBITED
+            )
+        }
+
+        return runCatching {
+                val effectiveParams =
+                    keyParams.copy(
+                        purpose = parsedOpParams.purpose,
+                        digest = parsedOpParams.digest.ifEmpty { keyParams.digest },
+                        blockMode = parsedOpParams.blockMode.ifEmpty { keyParams.blockMode },
+                        padding = parsedOpParams.padding.ifEmpty { keyParams.padding },
+                    )
+                val softwareOperation =
+                    SoftwareOperation(txId, generatedKeyInfo.keyPair!!, effectiveParams)
+
+                // F11: USAGE_COUNT_LIMIT — decrement on finish, delete key when exhausted.
+                // AOSP tracks this in database via check_and_update_key_usage_count on
+                // after_finish (enforcements.rs: l=510).
+                if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
+                    val limit = keyParams.usageCountLimit
+                    val remaining =
+                        usageCounters.getOrPut(resolvedKeyId) {
+                            java.util.concurrent.atomic.AtomicInteger(limit)
+                        }
+                    if (remaining.get() <= 0) {
+                        cleanupKeyData(resolvedKeyId)
+                        usageCounters.remove(resolvedKeyId)
+                        throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
+                    }
+                    softwareOperation.onFinishCallback = {
+                        if (remaining.decrementAndGet() <= 0) {
+                            cleanupKeyData(resolvedKeyId)
+                            usageCounters.remove(resolvedKeyId)
+                            SystemLogger.info(
+                                "Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit)."
+                            )
+                        }
+                    }
+                }
+
+                val operationBinder = SoftwareOperationBinder(softwareOperation)
+                val response =
+                    CreateOperationResponse().apply {
+                        iOperation = operationBinder
+                        operationChallenge = null
+                        // AOSP forwards begin_result.params into
+                        // CreateOperationResponse.parameters (security_level.rs: l=402).
+                        parameters = softwareOperation.beginParameters
+                    }
+
+                InterceptorUtils.createTypedObjectReply(response)
+            }
+            .getOrElse { e ->
+                SystemLogger.error("[TX_ID: $txId] Failed to create software operation.", e)
+                InterceptorUtils.createServiceSpecificErrorReply(
+                    if (e is android.os.ServiceSpecificException) e.errorCode
+                    else KeystoreErrorCode.SYSTEM_ERROR
+                )
+            }
     }
 
     /**
@@ -289,7 +427,12 @@ class KeyMintSecurityLevelInterceptor(
                             keyDescriptor,
                         )
                     generatedKeys[keyId] =
-                        GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
+                        GeneratedKeyInfo(
+                            keyData.first,
+                            keyDescriptor.nspace,
+                            response,
+                            parsedParams,
+                        )
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
@@ -368,6 +511,9 @@ class KeyMintSecurityLevelInterceptor(
         val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
         val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
+        // Tracks remaining usage count per key for USAGE_COUNT_LIMIT enforcement.
+        private val usageCounters =
+            ConcurrentHashMap<KeyIdentifier, java.util.concurrent.atomic.AtomicInteger>()
         // Stores interceptors for active cryptographic operations.
         private val interceptedOperations = ConcurrentHashMap<IBinder, OperationInterceptor>()
 
@@ -407,6 +553,7 @@ class KeyMintSecurityLevelInterceptor(
             if (attestationKeys.remove(keyId)) {
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
+            usageCounters.remove(keyId)
         }
 
         fun removeOperationInterceptor(operationBinder: IBinder, backdoor: IBinder) {
@@ -425,6 +572,7 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys.clear()
             patchedChains.clear()
             attestationKeys.clear()
+            usageCounters.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }

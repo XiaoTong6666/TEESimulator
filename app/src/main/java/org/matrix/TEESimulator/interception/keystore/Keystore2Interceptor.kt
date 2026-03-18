@@ -269,6 +269,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                                 keyData.first,
                                 key.nspace,
                                 response,
+                                parsedParameters,
                             )
                         KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
                         return InterceptorUtils.createTypedObjectReply(response)

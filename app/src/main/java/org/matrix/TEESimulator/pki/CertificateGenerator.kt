@@ -240,11 +240,16 @@ object CertificateGenerator {
             AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
         )
 
+        // The signature algorithm must match the SIGNING key, not the subject key.
+        // An EC attestation key may sign an RSA subject key's certificate (or vice versa).
         val signerAlgorithm =
-            when (params.algorithm) {
-                Algorithm.EC -> "SHA256withECDSA"
-                Algorithm.RSA -> "SHA256withRSA"
-                else -> throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
+            when (signingKeyPair.private) {
+                is java.security.interfaces.ECKey -> "SHA256withECDSA"
+                is java.security.interfaces.RSAKey -> "SHA256withRSA"
+                else ->
+                    throw IllegalArgumentException(
+                        "Unsupported signing key type: ${signingKeyPair.private.javaClass}"
+                    )
             }
         val contentSigner =
             JcaContentSignerBuilder(signerAlgorithm)

@@ -158,25 +158,25 @@ object ConfigurationManager {
                     return@forEach
                 }
 
+                val mode: Mode
+                val rawPkg: String
                 when {
-                    // Suffix '!' means force GENERATE mode.
                     trimmedLine.endsWith("!") -> {
-                        val pkg = trimmedLine.removeSuffix("!").trim()
-                        newModes[pkg] = Mode.GENERATE
-                        newKeyboxes[pkg] = currentKeybox
+                        mode = Mode.GENERATE
+                        rawPkg = trimmedLine.removeSuffix("!").trim()
                     }
-                    // Suffix '?' means force PATCH mode.
                     trimmedLine.endsWith("?") -> {
-                        val pkg = trimmedLine.removeSuffix("?").trim()
-                        newModes[pkg] = Mode.PATCH
-                        newKeyboxes[pkg] = currentKeybox
+                        mode = Mode.PATCH
+                        rawPkg = trimmedLine.removeSuffix("?").trim()
                     }
-                    // No suffix means AUTO mode.
                     else -> {
-                        newModes[trimmedLine] = Mode.AUTO
-                        newKeyboxes[trimmedLine] = currentKeybox
+                        mode = Mode.AUTO
+                        rawPkg = trimmedLine
                     }
                 }
+
+                newModes[rawPkg] = mode
+                newKeyboxes[rawPkg] = currentKeybox
             }
 
             // Atomically update the configuration maps.

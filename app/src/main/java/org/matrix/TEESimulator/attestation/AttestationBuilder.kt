@@ -434,6 +434,17 @@ object AttestationBuilder {
      */
     @Throws(Throwable::class)
     private fun createApplicationId(uid: Int): DEROctetString {
+        // AOSP keystore_attestation_id.cpp: gather_attestation_application_id()
+        // uses a hardcoded identity for AID_SYSTEM (1000) and AID_ROOT (0):
+        //   packageName = "AndroidSystem", versionCode = 1, no signing digests.
+        val appUid = uid % 100000
+        if (appUid == 0 || appUid == 1000) {
+            return buildApplicationIdDer(
+                listOf("AndroidSystem" to 1L),
+                emptySet(),
+            )
+        }
+
         val pm =
             ConfigurationManager.getPackageManager()
                 ?: throw IllegalStateException("PackageManager not found!")
@@ -441,12 +452,11 @@ object AttestationBuilder {
             pm.getPackagesForUid(uid) ?: throw IllegalStateException("No packages for UID $uid")
 
         val sha256 = MessageDigest.getInstance("SHA-256")
-        val packageInfoList = mutableListOf<DERSequence>()
+        val packageInfoList = mutableListOf<Pair<String, Long>>()
         val signatureDigests = mutableSetOf<Digest>()
 
-        // Process all packages associated with the UID in a single loop.
+        val userId = uid / 100000
         packages.forEach { packageName ->
-            val userId = uid / 100000
             val packageInfo =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     pm.getPackageInfo(
@@ -459,34 +469,36 @@ object AttestationBuilder {
                     pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES, userId)
                 }
 
-            // Add package information (name and version code) to our list.
-            packageInfoList.add(
-                DERSequence(
-                    arrayOf(
-                        DEROctetString(packageInfo.packageName.toByteArray(StandardCharsets.UTF_8)),
-                        ASN1Integer(packageInfo.longVersionCode),
-                    )
-                )
-            )
+            packageInfoList.add(packageInfo.packageName to packageInfo.longVersionCode)
 
-            // Collect unique signature digests from the signing history.
             packageInfo.signingInfo?.signingCertificateHistory?.forEach { signature ->
-                val digest = sha256.digest(signature.toByteArray())
-                signatureDigests.add(Digest(digest))
+                signatureDigests.add(Digest(sha256.digest(signature.toByteArray())))
             }
         }
 
-        // The application ID is a sequence of two sets:
-        // 1. A set of package information (name and version).
-        // 2. A set of SHA-256 digests of the signing certificates.
+        return buildApplicationIdDer(packageInfoList, signatureDigests)
+    }
+
+    private fun buildApplicationIdDer(
+        packages: List<Pair<String, Long>>,
+        digests: Set<Digest>,
+    ): DEROctetString {
+        val packageInfoList =
+            packages.map { (name, version) ->
+                DERSequence(
+                    arrayOf(
+                        DEROctetString(name.toByteArray(StandardCharsets.UTF_8)),
+                        ASN1Integer(version),
+                    )
+                )
+            }
         val applicationIdSequence =
             DERSequence(
                 arrayOf(
                     DERSet(packageInfoList.toTypedArray()),
-                    DERSet(signatureDigests.map { DEROctetString(it.digest) }.toTypedArray()),
+                    DERSet(digests.map { DEROctetString(it.digest) }.toTypedArray()),
                 )
             )
-
         return DEROctetString(applicationIdSequence.encoded)
     }
 }

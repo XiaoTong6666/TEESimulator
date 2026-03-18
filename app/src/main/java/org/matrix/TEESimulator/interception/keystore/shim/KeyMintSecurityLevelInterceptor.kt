@@ -404,15 +404,20 @@ class KeyMintSecurityLevelInterceptor(
                     )
                 }
 
-                // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE which
-                // normal apps lack.
-                if (
+                // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE.
+                val hasDeviceIdTags =
                     params.any {
                         it.tag == Tag.ATTESTATION_ID_SERIAL ||
                             it.tag == Tag.ATTESTATION_ID_IMEI ||
                             it.tag == Tag.ATTESTATION_ID_MEID ||
                             it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
                     }
+                if (
+                    hasDeviceIdTags &&
+                        !ConfigurationManager.hasPermissionForUid(
+                            callingUid,
+                            "android.permission.READ_PRIVILEGED_PHONE_STATE",
+                        )
                 ) {
                     return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
                         CANNOT_ATTEST_IDS

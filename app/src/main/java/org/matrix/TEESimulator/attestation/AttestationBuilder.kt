@@ -387,8 +387,7 @@ object AttestationBuilder {
             )
         )
 
-        // AOSP add_required_parameters (security_level.rs) only adds
-        // ATTESTATION_APPLICATION_ID when an attestation challenge is present.
+        // ATTESTATION_APPLICATION_ID is only included when an attestation challenge is present.
         if (params.attestationChallenge != null) {
             list.add(
                 DERTaggedObject(

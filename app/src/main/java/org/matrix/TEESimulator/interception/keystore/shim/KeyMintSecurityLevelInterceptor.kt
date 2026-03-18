@@ -214,9 +214,7 @@ class KeyMintSecurityLevelInterceptor(
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
-        // AOSP createOperation accepts Domain::APP (alias), Domain::KEY_ID (nspace),
-        // Domain::SELINUX, and Domain::BLOB. Resolve to our generated key by trying
-        // both alias-based and nspace-based lookups.
+        // Resolve key descriptor to a generated key via nspace (KEY_ID) or alias (APP).
         val generatedKeyInfo =
             when (keyDescriptor.domain) {
                 Domain.KEY_ID -> findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
@@ -243,10 +241,8 @@ class KeyMintSecurityLevelInterceptor(
         val parsedOpParams = KeyMintAttestation(opParams)
         val forced = data.readBoolean()
 
-        // --- AOSP enforcements.rs authorize_create() equivalent ---
         val keyParams = generatedKeyInfo.keyParams
 
-        // F14: Missing PURPOSE → INVALID_ARGUMENT (-38)
         val requestedPurpose = parsedOpParams.purpose.firstOrNull()
         if (requestedPurpose == null) {
             return InterceptorUtils.createServiceSpecificErrorReply(
@@ -254,15 +250,13 @@ class KeyMintSecurityLevelInterceptor(
             )
         }
 
-        // F9: Forced op without permission → PERMISSION_DENIED (6)
         if (forced) {
             return InterceptorUtils.createServiceSpecificErrorReply(
                 KeystoreErrorCode.PERMISSION_DENIED
             )
         }
 
-        // F8/F13: AOSP rejects VERIFY/ENCRYPT for asymmetric keys at the HAL level
-        // with UNSUPPORTED_PURPOSE (-2), distinct from INCOMPATIBLE_PURPOSE (-3).
+        // Asymmetric keys reject VERIFY/ENCRYPT at the HAL level (UNSUPPORTED_PURPOSE).
         val algorithm = keyParams.algorithm
         if (
             (algorithm == Algorithm.EC || algorithm == Algorithm.RSA) &&
@@ -273,7 +267,6 @@ class KeyMintSecurityLevelInterceptor(
             )
         }
 
-        // F1: PURPOSE not in key's allowed purposes → INCOMPATIBLE_PURPOSE (-3)
         if (requestedPurpose !in keyParams.purpose) {
             SystemLogger.info(
                 "[TX_ID: $txId] Rejecting: purpose $requestedPurpose not in ${keyParams.purpose}"
@@ -283,7 +276,6 @@ class KeyMintSecurityLevelInterceptor(
             )
         }
 
-        // F4: ACTIVE_DATETIME — KEY_NOT_YET_VALID (-24)
         keyParams.activeDateTime?.let { activeDate ->
             if (System.currentTimeMillis() < activeDate.time) {
                 return InterceptorUtils.createServiceSpecificErrorReply(
@@ -292,7 +284,7 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        // F2: ORIGINATION_EXPIRE_DATETIME — KEY_EXPIRED (-25) for SIGN/ENCRYPT only
+        // ORIGINATION_EXPIRE applies to SIGN/ENCRYPT only.
         keyParams.originationExpireDateTime?.let { expireDate ->
             if (
                 (requestedPurpose == KeyPurpose.SIGN ||
@@ -305,7 +297,7 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        // F3: USAGE_EXPIRE_DATETIME — KEY_EXPIRED (-25) for DECRYPT/VERIFY only
+        // USAGE_EXPIRE applies to DECRYPT/VERIFY only.
         keyParams.usageExpireDateTime?.let { expireDate ->
             if (
                 (requestedPurpose == KeyPurpose.DECRYPT ||
@@ -318,7 +310,6 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        // F7: CALLER_NONCE — CALLER_NONCE_PROHIBITED (-55)
         if (
             (requestedPurpose == KeyPurpose.SIGN || requestedPurpose == KeyPurpose.ENCRYPT) &&
                 keyParams.callerNonce != true &&
@@ -333,8 +324,7 @@ class KeyMintSecurityLevelInterceptor(
                 val softwareOperation =
                     SoftwareOperation(txId, generatedKeyInfo.keyPair, parsedOpParams)
 
-                // F11: USAGE_COUNT_LIMIT — decrement on finish, delete key when exhausted.
-                // AOSP tracks this in database via check_and_update_key_usage_count on after_finish.
+                // Decrement usage counter on finish; delete key when exhausted.
                 keyParams.usageCountLimit?.let { limit ->
                     val keyId =
                         generatedKeys.entries
@@ -393,8 +383,7 @@ class KeyMintSecurityLevelInterceptor(
                 )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
 
-                // AOSP add_required_parameters rejects caller-provided CREATION_DATETIME
-                // with INVALID_ARGUMENT. (security_level.rs:425-430)
+                // Caller-provided CREATION_DATETIME is not allowed.
                 if (params.any { it.tag == Tag.CREATION_DATETIME }) {
                     return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
                         INVALID_ARGUMENT
@@ -495,8 +484,7 @@ class KeyMintSecurityLevelInterceptor(
     companion object {
         private val secureRandom = SecureRandom()
 
-        // AOSP ResponseCode / ErrorCode constants used for ServiceSpecificException.
-        private const val INVALID_ARGUMENT = 20 // Keystore2 ResponseCode::INVALID_ARGUMENT
+        private const val INVALID_ARGUMENT = 20
 
         // Transaction codes for IKeystoreSecurityLevel interface.
         private val GENERATE_KEY_TRANSACTION =
@@ -678,9 +666,7 @@ private fun KeyMintAttestation.toAuthorizations(
         createAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis()))
     )
 
-    // AOSP keystore2 adds USER_ID at SecurityLevel.SOFTWARE (not TEE), since the
-    // application UID is a software concept. See AOSP security_level.rs store_new_key().
-    // AOSP class android.os.UserHandle: PER_USER_RANGE = 100000;
+    // USER_ID is a software-level property. PER_USER_RANGE = 100000.
     authList.add(
         Authorization().apply {
             this.keyParameter =

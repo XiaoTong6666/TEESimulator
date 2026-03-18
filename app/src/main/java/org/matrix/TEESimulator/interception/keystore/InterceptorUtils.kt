@@ -120,7 +120,7 @@ object InterceptorUtils {
 
     /**
      * Creates an `OverrideReply` that writes a `ServiceSpecificException` with the given error
-     * code, matching AOSP's `into_binder()` wire format (EX_SERVICE_SPECIFIC).
+     * code via EX_SERVICE_SPECIFIC.
      */
     fun createServiceSpecificErrorReply(
         errorCode: Int

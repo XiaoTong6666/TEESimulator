@@ -35,8 +35,7 @@ import org.matrix.TEESimulator.logging.SystemLogger
  */
 object CertificateGenerator {
 
-    // AOSP utils.rs: pub const UNDEFINED_NOT_AFTER: i64 = 253402300799000i64;
-    // RFC 5280 GeneralizedTime maximum: 9999-12-31T23:59:59 UTC (millis since epoch)
+    // RFC 5280 GeneralizedTime maximum: 9999-12-31T23:59:59 UTC (millis since epoch).
     private const val UNDEFINED_NOT_AFTER = 253402300799000L
 
     /**
@@ -223,9 +222,7 @@ object CertificateGenerator {
     ): Certificate {
         val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
 
-        // AOSP add_required_parameters (security_level.rs) defaults:
-        //   CERTIFICATE_NOT_BEFORE = 0 (Unix epoch)
-        //   CERTIFICATE_NOT_AFTER  = 253402300799000 (9999-12-31T23:59:59 UTC)
+        // Default validity: epoch to 9999-12-31T23:59:59 UTC (matches add_required_parameters).
         val notBefore = params.certificateNotBefore ?: Date(0)
         val notAfter = params.certificateNotAfter ?: Date(UNDEFINED_NOT_AFTER)
 

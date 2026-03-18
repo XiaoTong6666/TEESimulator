@@ -20,33 +20,15 @@ import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 
-/**
- * AOSP keystore2 error codes used in ServiceSpecificException. Negative values are KeyMint
- * ErrorCode constants; positive values are Keystore2 ResponseCode constants. See AOSP error.rs.
- */
+/** Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore. */
 internal object KeystoreErrorCode {
-    /** KeyMint ErrorCode::INVALID_OPERATION_HANDLE */
     const val INVALID_OPERATION_HANDLE = -28
-
-    /** KeyMint ErrorCode::VERIFICATION_FAILED */
     const val VERIFICATION_FAILED = -30
-
-    /** KeyMint ErrorCode::UNSUPPORTED_PURPOSE */
     const val UNSUPPORTED_PURPOSE = -2
-
-    /** KeyMint ErrorCode::INCOMPATIBLE_PURPOSE */
     const val INCOMPATIBLE_PURPOSE = -3
-
-    /** Keystore2 ResponseCode::SYSTEM_ERROR */
     const val SYSTEM_ERROR = 4
-
-    /** Keystore2 ResponseCode::TOO_MUCH_DATA */
     const val TOO_MUCH_DATA = 21
-
-    /** KeyMint ErrorCode::KEY_EXPIRED */
     const val KEY_EXPIRED = -25
-
-    /** KeyMint ErrorCode::KEY_NOT_YET_VALID */
     const val KEY_NOT_YET_VALID = -24
 
     /** KeyMint ErrorCode::CALLER_NONCE_PROHIBITED */
@@ -225,8 +207,7 @@ private class CipherPrimitive(
  * delegating to a specific cryptographic primitive based on the operation's purpose.
  *
  * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls throw
- * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE], matching AOSP
- * keystore2 behavior (operation.rs check_active).
+ * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE].
  */
 class SoftwareOperation(
     private val txId: Long,
@@ -327,16 +308,7 @@ class SoftwareOperation(
     }
 }
 
-/**
- * The Binder interface for [SoftwareOperation].
- *
- * All methods are synchronized to prevent concurrent access, matching AOSP's Mutex-protected
- * KeystoreOperation wrapper. Input data is validated against [MAX_RECEIVE_DATA] (32KB) to match
- * AOSP's enforced limit.
- *
- * All errors are reported as [ServiceSpecificException] with AOSP-compatible numeric error codes,
- * matching the wire format produced by AOSP's `into_binder()` in error.rs.
- */
+/** Binder interface for [SoftwareOperation]. Synchronized and input-length validated. */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
 
@@ -376,7 +348,6 @@ class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     }
 
     companion object {
-        // AOSP operation.rs MAX_RECEIVE_DATA = 0x8000
         private const val MAX_RECEIVE_DATA = 0x8000
     }
 }

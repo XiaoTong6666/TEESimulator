@@ -13,7 +13,6 @@ import android.system.keystore2.*
 import java.security.KeyPair
 import java.security.SecureRandom
 import java.security.cert.Certificate
-import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.attestation.AttestationPatcher
@@ -575,10 +574,9 @@ class KeyMintSecurityLevelInterceptor(
     }
 
     /**
-     * Races TEE hardware generation against software generation for AUTO mode when the TEE
-     * status is unknown. The hardware path is attempted concurrently with software generation.
-     * On hardware success, the software future is cancelled and TEE is marked functional.
-     * On hardware failure, the software result is used instead.
+     * Races TEE hardware generation against software generation concurrently for AUTO mode.
+     * If TEE succeeds, the software future is cancelled and TEE is marked functional.
+     * If TEE fails, the already-running software result is used without additional delay.
      */
     private fun raceTeePatch(
         callingUid: Int,
@@ -588,7 +586,7 @@ class KeyMintSecurityLevelInterceptor(
         parsedParams: KeyMintAttestation,
         isAttestKeyRequest: Boolean,
     ): TransactionResult {
-        SystemLogger.info("AUTO mode: racing TEE vs software for ${keyDescriptor.alias}")
+        SystemLogger.info("AUTO: racing TEE vs software for ${keyDescriptor.alias}")
 
         val teeDescriptor = KeyDescriptor().apply {
             domain = keyDescriptor.domain
@@ -632,13 +630,23 @@ class KeyMintSecurityLevelInterceptor(
             val originalChain = CertificateHelper.getCertificateChain(teeMetadata)
             if (originalChain != null && originalChain.size > 1) {
                 val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(teeMetadata, newChain).getOrThrow()
                 teeMetadata.authorizations =
                     InterceptorUtils.patchAuthorizations(teeMetadata.authorizations, callingUid)
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 cleanupKeyData(keyId)
                 patchedChains[keyId] = newChain
             }
+
+            // Cache the patched response for getKeyEntry. Stored in teeResponses
+            // (not generatedKeys) so createOperation forwards to real hardware.
+            val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+            val patchedResponse = KeyEntryResponse().apply {
+                this.metadata = teeMetadata
+                iSecurityLevel = original
+            }
+            teeResponses[keyId] = patchedResponse
+
             InterceptorUtils.createTypedObjectReply(teeMetadata)
         } catch (_: Exception) {
             SystemLogger.info("AUTO: TEE failed for ${keyDescriptor.alias}, using software result.")
@@ -728,6 +736,8 @@ class KeyMintSecurityLevelInterceptor(
         val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
         val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
+        // TEE-generated responses cached for getKeyEntry (not for createOperation).
+        val teeResponses = ConcurrentHashMap<KeyIdentifier, KeyEntryResponse>()
         // Tracks remaining usage count per key for USAGE_COUNT_LIMIT enforcement.
         private val usageCounters =
             ConcurrentHashMap<KeyIdentifier, java.util.concurrent.atomic.AtomicInteger>()
@@ -736,7 +746,7 @@ class KeyMintSecurityLevelInterceptor(
 
         // --- Public Accessors for Other Interceptors ---
         fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
-            generatedKeys[keyId]?.response
+            generatedKeys[keyId]?.response ?: teeResponses[keyId]
 
         /**
          * Finds a software-generated key by first filtering all known keys by the caller's UID, and
@@ -771,6 +781,7 @@ class KeyMintSecurityLevelInterceptor(
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
             usageCounters.remove(keyId)
+            teeResponses.remove(keyId)
         }
 
         fun removeOperationInterceptor(operationBinder: IBinder, backdoor: IBinder) {
@@ -790,6 +801,7 @@ class KeyMintSecurityLevelInterceptor(
             patchedChains.clear()
             attestationKeys.clear()
             usageCounters.clear()
+            teeResponses.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }

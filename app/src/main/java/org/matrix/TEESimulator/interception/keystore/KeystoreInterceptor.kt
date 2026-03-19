@@ -439,6 +439,15 @@ private data class LegacyKeygenParameters(
             callerNonce = null,
             unlockedDeviceRequired = null,
             includeUniqueId = null,
+            rollbackResistance = null,
+            earlyBootOnly = null,
+            allowWhileOnBody = null,
+            trustedUserPresenceRequired = null,
+            trustedConfirmationRequired = null,
+            maxUsesPerBoot = null,
+            maxBootLevel = null,
+            minMacLength = null,
+            rsaOaepMgfDigest = emptyList(),
         )
     }
 

@@ -114,6 +114,7 @@ class KeyMintSecurityLevelInterceptor(
                     ?: return TransactionResult.SkipTransaction
             val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
             cleanupKeyData(keyId)
+            importedKeys.add(keyId)
 
             // Patch imported key certificates the same way as generated keys.
             if (!ConfigurationManager.shouldSkipUid(callingUid)) {
@@ -736,6 +737,8 @@ class KeyMintSecurityLevelInterceptor(
         val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
         val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
+        // Keys imported via importKey; getKeyEntry must not override these.
+        val importedKeys: MutableSet<KeyIdentifier> = ConcurrentHashMap.newKeySet()
         // TEE-generated responses cached for getKeyEntry (not for createOperation).
         val teeResponses = ConcurrentHashMap<KeyIdentifier, KeyEntryResponse>()
         // Tracks remaining usage count per key for USAGE_COUNT_LIMIT enforcement.
@@ -780,6 +783,7 @@ class KeyMintSecurityLevelInterceptor(
             if (attestationKeys.remove(keyId)) {
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
             }
+            importedKeys.remove(keyId)
             usageCounters.remove(keyId)
             teeResponses.remove(keyId)
         }
@@ -800,6 +804,7 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys.clear()
             patchedChains.clear()
             attestationKeys.clear()
+            importedKeys.clear()
             usageCounters.clear()
             teeResponses.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")

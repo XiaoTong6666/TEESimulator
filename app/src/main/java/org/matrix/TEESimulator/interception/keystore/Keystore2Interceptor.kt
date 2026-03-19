@@ -303,7 +303,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
                         )
 
-                    if (parsedParameters.isAttestKey()) {
+                    if (parsedParameters.isAttestKey() &&
+                        !KeyMintSecurityLevelInterceptor.importedKeys.contains(keyId)
+                    ) {
                         SystemLogger.warning(
                             "[TX_ID: $txId] Found hardware attest key ${keyId.alias} in the reply."
                         )

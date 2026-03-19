@@ -45,6 +45,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (Build.VERSION.SDK_INT >= 34)
             InterceptorUtils.getTransactCode(stubBinderClass, "listEntriesBatched")
         else null
+    private val GET_NUMBER_OF_ENTRIES_TRANSACTION =
+        InterceptorUtils.getTransactCode(stubBinderClass, "getNumberOfEntries")
 
     private val transactionNames: Map<Int, String> by lazy {
         stubBinderClass.declaredFields
@@ -69,6 +71,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 UPDATE_SUBCOMPONENT_TRANSACTION,
                 LIST_ENTRIES_TRANSACTION,
                 LIST_ENTRIES_BATCHED_TRANSACTION,
+                GET_NUMBER_OF_ENTRIES_TRANSACTION,
             )
             .toIntArray()
     }
@@ -125,7 +128,12 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+        if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
+            return if (ConfigurationManager.shouldSkipUid(callingUid))
+                TransactionResult.ContinueAndSkipPost
+            else TransactionResult.Continue
+        } else if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
 
             val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
@@ -217,7 +225,26 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
-        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+        if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
+            logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
+            return runCatching {
+                    val hardwareCount = reply.readInt()
+                    val softwareCount =
+                        KeyMintSecurityLevelInterceptor.generatedKeys.keys.count {
+                            it.uid == callingUid
+                        }
+                    val totalCount = hardwareCount + softwareCount
+                    val parcel = Parcel.obtain().apply {
+                        writeNoException()
+                        writeInt(totalCount)
+                    }
+                    TransactionResult.OverrideReply(parcel)
+                }
+                .getOrElse {
+                    SystemLogger.error("[TX_ID: $txId] Failed to modify getNumberOfEntries.", it)
+                    TransactionResult.SkipTransaction
+                }
+        } else if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             return runCatching {

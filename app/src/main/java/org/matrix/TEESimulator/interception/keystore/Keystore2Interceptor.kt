@@ -64,6 +64,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     override val processName = "keystore2"
     override val injectionCommand = "exec ./inject `pidof keystore2` libTEESimulator.so entry"
 
+    // AOSP keystore2 exposes these service entry points separately.
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=416
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=425
     override val interceptedCodes: IntArray by lazy {
         listOfNotNull(
                 GET_KEY_ENTRY_TRANSACTION,
@@ -130,11 +133,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
+            // AOSP routes getNumberOfEntries() to count_num_entries() / count_key_entries().
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=315
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=617
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
             return if (ConfigurationManager.shouldSkipUid(callingUid))
                 TransactionResult.ContinueAndSkipPost
             else TransactionResult.Continue
         } else if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            // AOSP routes listEntries()/listEntriesBatched() to list_entries() / list_key_entries().
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=309
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=585
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
 
             val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
@@ -167,6 +176,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
 
             if (code == DELETE_KEY_TRANSACTION) {
                 // Handle delete by alias (APP domain) or nspace (KEY_ID domain).
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2060
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2123
                 val keyId =
                     if (descriptor.alias != null) {
                         KeyIdentifier(callingUid, descriptor.alias)
@@ -256,6 +267,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
             return runCatching {
+                    // AOSP returns the hardware/DB-visible count from count_key_entries().
+                    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=315
+                    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=617
                     val hardwareCount = reply.readInt()
                     val softwareCount =
                         KeyMintSecurityLevelInterceptor.generatedKeys.keys.count {
@@ -276,6 +290,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             return runCatching {
+                    // AOSP list_key_entries() merges legacy + DB entries and applies batching.
+                    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=309
+                    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=585
                     val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
                     val params =
                         ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
@@ -425,7 +442,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         val descriptor = data.readTypedObject(KeyDescriptor.CREATOR)
             ?: return TransactionResult.ContinueAndSkipPost
 
+        // AOSP exposes updateSubcomponent() at the IKeystoreService layer for certificate updates.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=416
         // Resolve by nspace (KEY_ID) or alias (APP), same as createOperation.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2060
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2123
         val generatedKeyInfo =
             when (descriptor.domain) {
                 Domain.KEY_ID ->

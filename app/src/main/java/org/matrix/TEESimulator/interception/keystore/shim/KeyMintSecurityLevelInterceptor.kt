@@ -124,6 +124,26 @@ class KeyMintSecurityLevelInterceptor(
             val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
             cleanupKeyData(keyId)
             importedKeys.add(keyId)
+
+            // Patch imported key certificates the same way as generated keys.
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=742
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=123
+            if (!ConfigurationManager.shouldSkipUid(callingUid)) {
+                val metadata: KeyMetadata =
+                    reply.readTypedObject(KeyMetadata.CREATOR)
+                        ?: return TransactionResult.SkipTransaction
+                val originalChain = CertificateHelper.getCertificateChain(metadata)
+                if (originalChain != null && originalChain.size > 1) {
+                    val newChain =
+                        AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                    CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+                    metadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
+                    patchedChains[keyId] = newChain
+                    SystemLogger.debug("Cached patched certificate chain for imported key $keyId.")
+                    return InterceptorUtils.createTypedObjectReply(metadata)
+                }
+            }
         } else if (code == CREATE_OPERATION_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
@@ -205,6 +225,9 @@ class KeyMintSecurityLevelInterceptor(
      * Handles the `createOperation` transaction. It checks if the operation is for a key that was
      * generated in software. If so, it creates a software-based operation handler. Otherwise, it
      * lets the call proceed to the real hardware service.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=382
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
      */
     private fun handleCreateOperation(
         txId: Long,
@@ -215,6 +238,8 @@ class KeyMintSecurityLevelInterceptor(
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
         // Resolve key descriptor to a generated key via nspace (KEY_ID) or alias (APP).
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2060
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/database.rs;l=2123
         val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo>? =
             when (keyDescriptor.domain) {
                 Domain.KEY_ID -> {
@@ -253,6 +278,9 @@ class KeyMintSecurityLevelInterceptor(
 
         val keyParams = generatedKeyInfo.keyParams
 
+        // AOSP authorize_create parity for purpose checks, date validity, caller nonce,
+        // and deferred USAGE_COUNT_LIMIT accounting:
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=382
         val requestedPurpose = parsedOpParams.purpose.firstOrNull()
         if (requestedPurpose == null) {
             return InterceptorUtils.createServiceSpecificErrorReply(
@@ -297,6 +325,7 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         // ORIGINATION_EXPIRE applies to SIGN/ENCRYPT only.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=487
         keyParams.originationExpireDateTime?.let { expireDate ->
             if (
                 (requestedPurpose == KeyPurpose.SIGN ||
@@ -310,6 +339,7 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         // USAGE_EXPIRE applies to DECRYPT/VERIFY only.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=494
         keyParams.usageExpireDateTime?.let { expireDate ->
             if (
                 (requestedPurpose == KeyPurpose.DECRYPT ||
@@ -352,6 +382,7 @@ class KeyMintSecurityLevelInterceptor(
                     )
 
                 // Decrement usage counter on finish; delete key when exhausted.
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=510
                 if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
                     val limit = keyParams.usageCountLimit
                     val remaining =
@@ -377,6 +408,8 @@ class KeyMintSecurityLevelInterceptor(
                     CreateOperationResponse().apply {
                         iOperation = operationBinder
                         operationChallenge = null
+                        // AOSP forwards begin_result.params into CreateOperationResponse.parameters.
+                        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
                         parameters = softwareOperation.beginParameters
                     }
 
@@ -394,6 +427,9 @@ class KeyMintSecurityLevelInterceptor(
     /**
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
      * either generates a key in software or lets the call pass through to the hardware.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=123
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=416
      */
     private fun handleGenerateKey(callingUid: Int, callingPid: Int, data: Parcel): TransactionResult {
         return runCatching {
@@ -406,7 +442,12 @@ class KeyMintSecurityLevelInterceptor(
 
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
 
+                // AOSP add_required_parameters parity for CREATION_DATETIME rejection,
+                // device-ID attestation tag detection / permission checks, and INCLUDE_UNIQUE_ID gating.
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=416
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=115
                 // Caller-provided CREATION_DATETIME is not allowed.
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=424
                 if (params.any { it.tag == Tag.CREATION_DATETIME }) {
                     return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
                         INVALID_ARGUMENT
@@ -414,6 +455,8 @@ class KeyMintSecurityLevelInterceptor(
                 }
 
                 // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE.
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=500
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=129
                 val hasDeviceIdTags =
                     params.any {
                         it.tag == Tag.ATTESTATION_ID_SERIAL ||
@@ -436,6 +479,8 @@ class KeyMintSecurityLevelInterceptor(
 
                 // INCLUDE_UNIQUE_ID requires SELinux gen_unique_id OR Android
                 // REQUEST_UNIQUE_ID_ATTESTATION (security_level.rs:478-485).
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=478
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=139
                 if (params.any { it.tag == Tag.INCLUDE_UNIQUE_ID }) {
                     val hasSELinux =
                         ConfigurationManager.checkSELinuxPermission(
@@ -498,7 +543,11 @@ class KeyMintSecurityLevelInterceptor(
             }
     }
 
-    /** Performs software key generation and caches the result. */
+    /**
+     * Performs software key generation and caches the result.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=123
+     */
     private fun doSoftwareGeneration(
         callingUid: Int,
         keyDescriptor: KeyDescriptor,
@@ -693,9 +742,7 @@ class KeyMintSecurityLevelInterceptor(
         }
     }
 
-    /**
-     * Constructs a fake `KeyEntryResponse` that mimics a real response from the Keystore service.
-     */
+    /** Constructs a fake `KeyEntryResponse` that mimics a real response from the Keystore service. */
     private fun buildKeyEntryResponse(
         callingUid: Int,
         chain: List<Certificate>,
@@ -844,6 +891,9 @@ class KeyMintSecurityLevelInterceptor(
 /**
  * Extension function to convert parsed `KeyMintAttestation` parameters back into an array of
  * `Authorization` objects for the fake `KeyMetadata`.
+ *
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=123
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=165
  */
 private fun KeyMintAttestation.toAuthorizations(
     callingUid: Int,
@@ -962,6 +1012,8 @@ private fun KeyMintAttestation.toAuthorizations(
     }
 
     // Software-enforced tags: CREATION_DATETIME, enforcement dates, USER_ID.
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=165
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=436
     fun createSwAuth(tag: Int, value: KeyParameterValue): Authorization {
         val param =
             KeyParameter().apply {

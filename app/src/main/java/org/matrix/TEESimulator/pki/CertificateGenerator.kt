@@ -36,13 +36,22 @@ import org.matrix.TEESimulator.logging.SystemLogger
 object CertificateGenerator {
 
     // RFC 5280 GeneralizedTime maximum: 9999-12-31T23:59:59 UTC (millis since epoch).
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=61
     private const val UNDEFINED_NOT_AFTER = 253402300799000L
 
     /**
      * Generates a software-based cryptographic key pair.
      *
+     * This simulates the parameter shape of AOSP software Keymaster key generation:
+     * EC generation is driven by EC_CURVE / KEY_SIZE matching, and RSA generation is driven by
+     * RSA_PUBLIC_EXPONENT + KEY_SIZE.
+     *
      * @param params The parameters specifying the key's algorithm, size, and other properties.
      * @return A new [KeyPair], or `null` on failure.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=54
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=84
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_key_factory.cpp;l=54
      */
     fun generateSoftwareKeyPair(params: KeyMintAttestation): KeyPair? {
         return runCatching {
@@ -79,6 +88,9 @@ object CertificateGenerator {
      * @param params The parameters for the new key and its attestation.
      * @param securityLevel The security level to embed in the attestation.
      * @return A [List] of [Certificate] forming the new chain, or `null` on failure.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_utils.cpp;l=303
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/certificate_utils.cpp;l=324
      */
     fun generateCertificateChain(
         uid: Int,
@@ -123,6 +135,13 @@ object CertificateGenerator {
     /**
      * A convenience function that combines key pair generation and certificate chain generation.
      * Primarily used by the modern Keystore2 interceptor where generation is a single step.
+     *
+     * This helper simulates the higher-level AOSP flow where key generation produces key material
+     * and attestation flow then constructs and signs the resulting certificate chain.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=84
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_key_factory.cpp;l=54
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_utils.cpp;l=303
      */
     fun generateAttestedKeyPair(
         uid: Int,
@@ -159,6 +178,10 @@ object CertificateGenerator {
         X509CertificateHolder(keybox.certificates[0].encoded).subject
 
     private fun getKeyboxForAlgorithm(uid: Int, algorithm: Int): KeyBox {
+        // AOSP generate_key() may proceed with a user-generated attestation key, an
+        // RKPD-provisioned attestation key, or no attestation key.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=570
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=667
         val keyboxFile = ConfigurationManager.getKeyboxFileForUid(uid)
         val algorithmName =
             when (algorithm) {
@@ -213,7 +236,12 @@ object CertificateGenerator {
         return bits
     }
 
-    /** Constructs a new X.509 certificate with a simulated attestation extension. */
+    /**
+     * Constructs a new X.509 certificate with a simulated attestation extension.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/certificate_utils.cpp;l=37
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/certificate_utils.cpp;l=324
+     */
     private fun buildCertificate(
         subjectKeyPair: KeyPair,
         signingKeyPair: KeyPair,
@@ -222,9 +250,12 @@ object CertificateGenerator {
         uid: Int,
         securityLevel: Int,
     ): Certificate {
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/certificate_utils.cpp;l=37
         val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
 
         // Default validity: epoch to 9999-12-31T23:59:59 UTC (matches add_required_parameters).
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=511
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=61
         val notBefore = params.certificateNotBefore ?: Date(0)
         val notAfter = params.certificateNotAfter ?: Date(UNDEFINED_NOT_AFTER)
 
@@ -250,6 +281,8 @@ object CertificateGenerator {
 
         // The signature algorithm must match the SIGNING key, not the subject key.
         // An EC attestation key may sign an RSA subject key's certificate (or vice versa).
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_utils.cpp;l=311
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/certificate_utils.cpp;l=324
         val signerAlgorithm =
             when (signingKeyPair.private) {
                 is java.security.interfaces.ECKey -> "SHA256withECDSA"

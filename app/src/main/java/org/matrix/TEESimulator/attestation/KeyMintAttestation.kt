@@ -42,6 +42,9 @@ data class KeyMintAttestation(
     val model: ByteArray?,
     val secondImei: ByteArray?,
     // Enforcement tags
+    // key_parameter.rs: RSA_OAEP_MGF_DIGEST through MAX_BOOT_LEVEL.
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=855
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1041
     val activeDateTime: Date?,
     val originationExpireDateTime: Date?,
     val usageExpireDateTime: Date?,
@@ -64,54 +67,73 @@ data class KeyMintAttestation(
         params: Array<KeyParameter>
     ) : this(
         // AOSP: [key_param(tag = ALGORITHM, field = Algorithm)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=837
         algorithm = params.findAlgorithm(Tag.ALGORITHM) ?: 0,
 
         // AOSP: [key_param(tag = KEY_SIZE, field = Integer)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=840
         // For EC keys, derive keySize from EC_CURVE when KEY_SIZE is absent.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=54
         keySize = params.findInteger(Tag.KEY_SIZE) ?: params.deriveKeySizeFromCurve(),
 
         // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=871
         ecCurve = params.findEcCurve(Tag.EC_CURVE),
         ecCurveName = params.deriveEcCurveName(),
 
         // AOSP: [key_param(tag = ORIGIN, field = Origin)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=955
         origin = params.findOrigin(Tag.ORIGIN),
 
         // AOSP: [key_param(tag = NO_AUTH_REQUIRED, field = BoolValue)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=917
         noAuthRequired = params.findBoolean(Tag.NO_AUTH_REQUIRED),
 
         // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=845
         blockMode = params.findAllBlockMode(Tag.BLOCK_MODE),
 
         // AOSP: [key_param(tag = PADDING, field = PaddingMode)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=860
         padding = params.findAllPaddingMode(Tag.PADDING),
 
         // AOSP: [key_param(tag = PURPOSE, field = KeyPurpose)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=832
         purpose = params.findAllKeyPurpose(Tag.PURPOSE),
 
         // AOSP: [key_param(tag = DIGEST, field = Digest)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=850
         digest = params.findAllDigests(Tag.DIGEST),
 
         // AOSP: [key_param(tag = RSA_PUBLIC_EXPONENT, field = LongInteger)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=874
         rsaPublicExponent = params.findLongInteger(Tag.RSA_PUBLIC_EXPONENT),
 
         // AOSP: [key_param(tag = CERTIFICATE_SERIAL, field = Blob)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1028
         certificateSerial = params.findBlob(Tag.CERTIFICATE_SERIAL)?.let { BigInteger(it) },
 
         // AOSP: [key_param(tag = CERTIFICATE_SUBJECT, field = Blob)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1032
         certificateSubject =
             params.findBlob(Tag.CERTIFICATE_SUBJECT)?.let { X500Name(X500Principal(it).name) },
 
         // AOSP: [key_param(tag = CERTIFICATE_NOT_BEFORE, field = DateTime)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1035
         certificateNotBefore = params.findDate(Tag.CERTIFICATE_NOT_BEFORE),
 
         // AOSP: [key_param(tag = CERTIFICATE_NOT_AFTER, field = DateTime)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1038
         certificateNotAfter = params.findDate(Tag.CERTIFICATE_NOT_AFTER),
 
         // AOSP: [key_param(tag = ATTESTATION_CHALLENGE, field = Blob)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=970
         attestationChallenge = params.findBlob(Tag.ATTESTATION_CHALLENGE),
 
         // AOSP: [key_param(tag = ATTESTATION_ID_*, field = Blob)]
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=976
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=991
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1000
         brand = params.findBlob(Tag.ATTESTATION_ID_BRAND),
         device = params.findBlob(Tag.ATTESTATION_ID_DEVICE),
         product = params.findBlob(Tag.ATTESTATION_ID_PRODUCT),
@@ -123,6 +145,9 @@ data class KeyMintAttestation(
         secondImei = params.findBlob(Tag.ATTESTATION_ID_SECOND_IMEI),
 
         // Enforcement tags
+        // key_parameter.rs: RSA_OAEP_MGF_DIGEST through MAX_BOOT_LEVEL.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=855
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=1041
         activeDateTime = params.findDate(Tag.ACTIVE_DATETIME),
         originationExpireDateTime = params.findDate(Tag.ORIGINATION_EXPIRE_DATETIME),
         usageExpireDateTime = params.findDate(Tag.USAGE_EXPIRE_DATETIME),
@@ -138,6 +163,7 @@ data class KeyMintAttestation(
         maxUsesPerBoot = params.findInteger(Tag.MAX_USES_PER_BOOT),
         maxBootLevel = params.findInteger(Tag.MAX_BOOT_LEVEL),
         minMacLength = params.findInteger(Tag.MIN_MAC_LENGTH),
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=855
         rsaOaepMgfDigest = params.findAllDigests(Tag.RSA_OAEP_MGF_DIGEST),
     ) {
         // Log all parsed parameters for debugging purposes.
@@ -203,7 +229,11 @@ private fun Array<KeyParameter>.findAllKeyPurpose(tag: Int): List<Int> =
 private fun Array<KeyParameter>.findAllDigests(tag: Int): List<Int> =
     this.filter { it.tag == tag }.map { it.value.digest }
 
-/** Derives keySize from EC_CURVE tag when KEY_SIZE is not explicitly provided. */
+/**
+ * Derives keySize from EC_CURVE tag when KEY_SIZE is not explicitly provided.
+ *
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=54
+ */
 private fun Array<KeyParameter>.deriveKeySizeFromCurve(): Int {
     val curveId = this.find { it.tag == Tag.EC_CURVE }?.value?.ecCurve ?: return 0
     return when (curveId) {

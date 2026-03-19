@@ -172,6 +172,8 @@ object AttestationBuilder {
      * C = DER-encoded ATTESTATION_APPLICATION_ID
      * R = 0x00 (no factory reset since ID rotation)
      * HBK = device-unique secret generated once during module installation
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=965
      */
     private fun computeUniqueId(creationTimeMs: Long, aaidDer: ByteArray): ByteArray {
         val temporalCounter = creationTimeMs / 2592000000L
@@ -200,12 +202,19 @@ object AttestationBuilder {
         }
     }
 
-    /** Builds the `TeeEnforced` authorization list. These are properties the TEE "guarantees". */
+    /**
+     * Builds the `TeeEnforced` authorization list. These are properties the TEE "guarantees".
+     *
+     * This simulates the attestation-record authorization-list serialization for TEE-enforced
+     * enum / integer / date fields.
+     */
     private fun buildTeeEnforcedList(
         params: KeyMintAttestation,
         uid: Int,
         securityLevel: Int,
     ): DERSequence {
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=492
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=550
         val list =
             mutableListOf<ASN1Encodable>(
                 DERTaggedObject(
@@ -272,6 +281,14 @@ object AttestationBuilder {
 
         val attestVersion = AndroidDeviceUtils.getAttestVersion(securityLevel)
 
+        // Additional auth-list fields mirrored from KeyParameter definitions and the AOSP
+        // attestation-record serializer.
+        // key_parameter.rs: RSA_OAEP_MGF_DIGEST through UNLOCKED_DEVICE_REQUIRED
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs;l=855
+        // attestation_record.cpp: mgf_digest / min_mac_length / usage_count_limit / boolean flags
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=577
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=594
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp;l=626
         if (params.rsaOaepMgfDigest.isNotEmpty() && attestVersion >= 100) {
             list.add(
                 DERTaggedObject(
@@ -452,6 +469,12 @@ object AttestationBuilder {
         securityLevel: Int,
         creationTimeMs: Long = System.currentTimeMillis(),
     ): DERSequence {
+        // softwareEnforced mirrors keystore2-added parameters plus create-time enforcements:
+        // security_level.rs add_required_parameters()
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=416
+        // enforcements.rs authorize_create() date / usage-count handling
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=481
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=510
         val list = mutableListOf<ASN1Encodable>()
 
         list.add(
@@ -463,6 +486,7 @@ object AttestationBuilder {
         )
 
         // ATTESTATION_APPLICATION_ID is only included when an attestation challenge is present.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=457
         if (params.attestationChallenge != null) {
             list.add(
                 DERTaggedObject(
@@ -484,6 +508,7 @@ object AttestationBuilder {
 
         // Keystore2-enforced tags belong in softwareEnforced, not teeEnforced.
         // The HAL does not enforce these; keystore2's authorize_create handles them.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/enforcements.rs;l=481
         params.activeDateTime?.let {
             list.add(
                 DERTaggedObject(true, AttestationConstants.TAG_ACTIVE_DATETIME, ASN1Integer(it.time))
@@ -557,6 +582,8 @@ object AttestationBuilder {
         // AOSP keystore_attestation_id.cpp: gather_attestation_application_id()
         // uses a hardcoded identity for AID_SYSTEM (1000) and AID_ROOT (0):
         //   packageName = "AndroidSystem", versionCode = 1, no signing digests.
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore/keystore_attestation_id.cpp;l=52
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore/keystore_attestation_id.cpp;l=275
         val appUid = uid % 100000
         if (appUid == 0 || appUid == 1000) {
             return buildApplicationIdDer(

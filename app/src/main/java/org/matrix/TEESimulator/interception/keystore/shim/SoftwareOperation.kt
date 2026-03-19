@@ -20,30 +20,62 @@ import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 
-/** Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore. */
+/**
+ * Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore.
+ *
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=36
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl;l=35
+ */
 internal object KeystoreErrorCode {
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=88
     const val INVALID_OPERATION_HANDLE = -28
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=92
     const val VERIFICATION_FAILED = -30
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=36
     const val UNSUPPORTED_PURPOSE = -2
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=38
     const val INCOMPATIBLE_PURPOSE = -3
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl;l=35
     const val SYSTEM_ERROR = 4
     const val TOO_MUCH_DATA = 21
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=82
     const val KEY_EXPIRED = -25
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=80
     const val KEY_NOT_YET_VALID = -24
 
-    /** KeyMint ErrorCode::CALLER_NONCE_PROHIBITED */
+    /**
+     * KeyMint ErrorCode::CALLER_NONCE_PROHIBITED
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=138
+     */
     const val CALLER_NONCE_PROHIBITED = -55
 
-    /** KeyMint ErrorCode::INVALID_ARGUMENT */
+    /**
+     * KeyMint ErrorCode::INVALID_ARGUMENT
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=108
+     */
     const val INVALID_ARGUMENT = -38
 
-    /** KeyMint ErrorCode::INVALID_TAG */
+    /**
+     * KeyMint ErrorCode::INVALID_TAG
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h;l=112
+     */
     const val INVALID_TAG = -40
 
-    /** Keystore2 ResponseCode::PERMISSION_DENIED */
+    /**
+     * Keystore2 ResponseCode::PERMISSION_DENIED
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl;l=40
+     */
     const val PERMISSION_DENIED = 6
 
-    /** Keystore2 ResponseCode::KEY_NOT_FOUND */
+    /**
+     * Keystore2 ResponseCode::KEY_NOT_FOUND
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl;l=45
+     */
     const val KEY_NOT_FOUND = 7
 }
 
@@ -57,12 +89,20 @@ private sealed interface CryptoPrimitive {
 
     fun abort()
 
-    /** Returns parameters from the begin phase (e.g. GCM nonce), or null if none. */
+    /**
+     * Returns parameters from the begin phase (e.g. GCM nonce), or null if none.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
+     */
     fun getBeginParameters(): Array<KeyParameter>? = null
 }
 
-// Helper object to map KeyMint constants to JCA algorithm strings.
+// Helper object to map KeyMint parameters onto the simulated software primitives we expose via JCA.
 private object JcaAlgorithmMapper {
+    // AOSP sign operations derive the effective signature behavior from the key algorithm and the
+    // selected digest.
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ecdsa_operation.cpp;l=79
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_operation.cpp;l=63
     fun mapSignatureAlgorithm(params: KeyMintAttestation): String {
         val digest =
             when (params.digest.firstOrNull()) {
@@ -84,6 +124,10 @@ private object JcaAlgorithmMapper {
         return "${digest}with${keyAlgo}"
     }
 
+    // AOSP cipher operations derive behavior from algorithm, block mode, and padding tags.
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/block_cipher_operation.cpp;l=39
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/block_cipher_operation.cpp;l=79
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_operation.cpp;l=66
     fun mapCipherAlgorithm(params: KeyMintAttestation): String {
         val keyAlgo =
             when (params.algorithm) {
@@ -116,6 +160,8 @@ private object JcaAlgorithmMapper {
 }
 
 // Concrete implementation for Signing.
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ecdsa_operation.cpp;l=138
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_operation.cpp;l=305
 private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -140,6 +186,8 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
 }
 
 // Concrete implementation for Verification.
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ecdsa_operation.cpp;l=273
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/rsa_operation.cpp;l=438
 private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -175,6 +223,7 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
 }
 
 // Concrete implementation for Encryption/Decryption.
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/block_cipher_operation.cpp;l=79
 private class CipherPrimitive(
     cryptoKey: java.security.Key,
     params: KeyMintAttestation,
@@ -231,7 +280,11 @@ private class CipherPrimitive(
 
     override fun abort() {}
 
-    /** Returns the cipher IV as a NONCE parameter for GCM operations. */
+    /**
+     * Returns the cipher IV as a NONCE parameter for GCM operations.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
+     */
     override fun getBeginParameters(): Array<KeyParameter>? {
         val iv = cipher.iv ?: return null
         return arrayOf(
@@ -244,6 +297,7 @@ private class CipherPrimitive(
 }
 
 // Concrete implementation for ECDH Key Agreement.
+// https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ecdh_operation.cpp;l=52
 private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
     private val agreement: javax.crypto.KeyAgreement =
         javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
@@ -276,6 +330,9 @@ private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
  *
  * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls throw
  * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE].
+ *
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=26
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=320
  */
 class SoftwareOperation(
     private val txId: Long,
@@ -319,7 +376,11 @@ class SoftwareOperation(
             }
     }
 
-    /** Parameters produced during begin (e.g. GCM nonce), to populate CreateOperationResponse. */
+    /**
+     * Parameters produced during begin (e.g. GCM nonce), to populate CreateOperationResponse.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
+     */
     val beginParameters: KeyParameters?
         get() {
             val params = primitive.getBeginParameters() ?: return null
@@ -392,11 +453,18 @@ class SoftwareOperation(
     }
 }
 
-/** Binder interface for [SoftwareOperation]. Synchronized and input-length validated. */
+/**
+ * Binder interface for [SoftwareOperation]. Synchronized and input-length validated.
+ *
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=74
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=216
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=809
+ */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
 
     private fun checkInputLength(data: ByteArray?) {
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=337
         if (data != null && data.size > MAX_RECEIVE_DATA)
             throw ServiceSpecificException(KeystoreErrorCode.TOO_MUCH_DATA)
     }
@@ -432,6 +500,7 @@ class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     }
 
     companion object {
+        // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs;l=216
         private const val MAX_RECEIVE_DATA = 0x8000
     }
 }

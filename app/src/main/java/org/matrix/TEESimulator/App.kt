@@ -40,9 +40,6 @@ object App {
             // Initialize and start the appropriate keystore interceptors.
             initializeInterceptors()
 
-            // Load configuration and check TEE status after interceptors are active.
-            // The TEE check key alias is excluded from interception so it goes
-            // directly to real hardware.
             ConfigurationManager.initialize()
             AndroidDeviceUtils.setupBootKeyAndHash()
 

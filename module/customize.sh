@@ -88,6 +88,9 @@ if [ ! -f "$CONFIG_DIR/target.txt" ]; then
   install_file "target.txt" "$CONFIG_DIR"
 fi
 
+# Remove legacy TEE status file; TEE status is now determined at runtime.
+rm -f "$CONFIG_DIR/tee_status.txt"
+
 if [ ! -f "$CONFIG_DIR/hbk" ]; then
   ui_print "- Generating device-unique hardware-bound key seed"
   head -c 32 /dev/random > "$CONFIG_DIR/hbk"

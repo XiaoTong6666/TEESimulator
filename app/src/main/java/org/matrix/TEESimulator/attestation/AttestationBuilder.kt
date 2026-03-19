@@ -240,6 +240,16 @@ object AttestationBuilder {
             )
         }
 
+        if (params.blockMode.isNotEmpty()) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_BLOCK_MODE,
+                    DERSet(params.blockMode.map { ASN1Integer(it.toLong()) }.toTypedArray()),
+                )
+            )
+        }
+
         if (params.padding.isNotEmpty()) {
             list.add(
                 DERTaggedObject(

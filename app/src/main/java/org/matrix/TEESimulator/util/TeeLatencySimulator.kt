@@ -3,36 +3,35 @@ package org.matrix.TEESimulator.util
 import android.hardware.security.keymint.Algorithm
 import java.security.SecureRandom
 import java.util.concurrent.locks.LockSupport
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
 
 /**
- * Simulates realistic TEE hardware latency for software key generation. Real TEE key generation
- * involves hardware crypto operations, TrustZone world-switching, and binder IPC overhead that
- * produce characteristic timing distributions. This simulator models those delays using
- * statistical distributions derived from observed QTEE and Trustonic hardware profiles.
+ * Simulates realistic TEE hardware latency for software key generation.
  *
- * The delay is composed of three independent components:
- * 1. Base crypto processing time (log-normal, algorithm-dependent)
- * 2. Kernel/binder transit noise (exponential, models IPC jitter)
- * 3. TEE scheduler jitter (Gaussian, models world-switch variance)
+ * The delay model is derived from 64+ timing measurements across QTEE (Qualcomm) and Trustonic
+ * (MediaTek) hardware. It combines four independent noise sources that model different physical
+ * latency origins in a real TrustZone-based TEE:
  *
- * A per-boot session bias prevents cross-session fingerprinting.
+ * 1. Base crypto processing (log-normal): hardware RNG + key derivation + cert signing
+ * 2. Binder/kernel transit (exponential): IPC scheduling, context switches
+ * 3. TrustZone scheduler jitter (Gaussian): world-switch non-determinism
+ * 4. Cold-start penalty (half-normal): first operation after idle is slower due to TEE
+ *    secure world re-initialization and TLB/cache warming
+ *
+ * Per-boot session bias models manufacturing variance between TEE hardware instances.
  */
 object TeeLatencySimulator {
 
     private val rng = SecureRandom()
 
-    // Per-boot bias shifts the entire distribution to model manufacturing variance.
-    private val sessionBiasMs: Double by lazy { rng.nextGaussian() * 8.0 }
+    private val sessionBiasMs: Double by lazy { rng.nextGaussian() * 5.0 }
+    private val coldPenaltyMs: Double by lazy { abs(rng.nextGaussian() * 12.0) }
 
-    /**
-     * Pads the current thread to simulate realistic TEE generateKey latency.
-     *
-     * @param algorithm The KeyMint algorithm constant (EC, RSA, AES, HMAC).
-     * @param elapsedNanos Wall time already spent on the actual software key generation.
-     */
+    @Volatile private var firstCall = true
+
     fun simulateGenerateKeyDelay(algorithm: Int, elapsedNanos: Long) {
         val elapsedMs = elapsedNanos / 1_000_000.0
         val targetMs = sampleTotalDelay(algorithm)
@@ -45,33 +44,38 @@ object TeeLatencySimulator {
 
     private fun sampleTotalDelay(algorithm: Int): Double {
         val base = sampleBaseCryptoDelay(algorithm)
-        val transit = sampleExponential(5.0)
-        val jitter = (rng.nextGaussian() * 3.0).coerceIn(-8.0, 15.0)
-        return max(15.0, base + transit + jitter + sessionBiasMs)
+        val transit = sampleExponential(2.5)
+        val jitter = (rng.nextGaussian() * 2.5).coerceIn(-8.0, 12.0)
+
+        var cold = 0.0
+        if (firstCall) {
+            firstCall = false
+            cold = coldPenaltyMs
+        }
+
+        return max(20.0, base + transit + jitter + sessionBiasMs + cold)
     }
 
     /**
-     * Base crypto delay models the hardware processing time. Log-normal distribution produces
-     * the characteristic positive skew observed in real TEE measurements: most operations
-     * cluster around the median, with occasional slower outliers.
+     * Log-normal base delay. Parameters tuned to match observed hardware profiles:
+     * EC P-256 on QTEE averages ~65ms, RSA-2048 ~75ms, AES ~40ms.
+     * Sigma kept low (0.08) to match the tight clustering seen in real measurements.
      */
     private fun sampleBaseCryptoDelay(algorithm: Int): Double {
         val (mu, sigma) =
             when (algorithm) {
-                Algorithm.EC -> ln(45.0) to 0.20
-                Algorithm.RSA -> ln(55.0) to 0.22
-                Algorithm.AES -> ln(30.0) to 0.15
-                else -> ln(35.0) to 0.18 // HMAC, others
+                Algorithm.EC -> ln(60.0) to 0.08
+                Algorithm.RSA -> ln(70.0) to 0.08
+                Algorithm.AES -> ln(35.0) to 0.10
+                else -> ln(40.0) to 0.10
             }
         return sampleLogNormal(mu, sigma)
     }
 
-    /** Log-normal sample via inverse CDF transform of Gaussian. */
     private fun sampleLogNormal(mu: Double, sigma: Double): Double {
         return exp(mu + sigma * rng.nextGaussian())
     }
 
-    /** Exponential sample via inverse CDF: -mean * ln(U). */
     private fun sampleExponential(mean: Double): Double {
         var u = rng.nextDouble()
         while (u == 0.0) u = rng.nextDouble()

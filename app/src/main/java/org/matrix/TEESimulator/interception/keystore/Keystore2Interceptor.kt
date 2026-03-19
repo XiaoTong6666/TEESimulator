@@ -165,8 +165,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
 
             if (code == DELETE_KEY_TRANSACTION) {
-                if (KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId) != null) {
-                    KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                val isSoftwareKey =
+                    KeyMintSecurityLevelInterceptor.generatedKeys.containsKey(keyId)
+                KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                if (isSoftwareKey) {
                     SystemLogger.info(
                         "[TX_ID: $txId] Deleted cached keypair ${descriptor.alias}, replying with empty response."
                     )

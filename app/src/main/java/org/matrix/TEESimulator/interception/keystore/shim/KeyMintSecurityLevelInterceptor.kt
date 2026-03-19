@@ -38,7 +38,8 @@ class KeyMintSecurityLevelInterceptor(
 
     // --- Data Structures for State Management ---
     data class GeneratedKeyInfo(
-        val keyPair: KeyPair,
+        val keyPair: KeyPair?,
+        val secretKey: javax.crypto.SecretKey?,
         val nspace: Long,
         val response: KeyEntryResponse,
         val keyParams: KeyMintAttestation,
@@ -351,7 +352,12 @@ class KeyMintSecurityLevelInterceptor(
                 val effectiveParams =
                     keyParams.copy(purpose = parsedOpParams.purpose, digest = parsedOpParams.digest.ifEmpty { keyParams.digest })
                 val softwareOperation =
-                    SoftwareOperation(txId, generatedKeyInfo.keyPair, effectiveParams)
+                    SoftwareOperation(
+                        txId,
+                        generatedKeyInfo.keyPair,
+                        generatedKeyInfo.secretKey,
+                        effectiveParams,
+                    )
 
                 // Decrement usage counter on finish; delete key when exhausted.
                 if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
@@ -500,6 +506,48 @@ class KeyMintSecurityLevelInterceptor(
             "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
         )
 
+        val isSymmetric =
+            parsedParams.algorithm != Algorithm.EC && parsedParams.algorithm != Algorithm.RSA
+
+        val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+        cleanupKeyData(keyId)
+
+        if (isSymmetric) {
+            val algoName =
+                when (parsedParams.algorithm) {
+                    Algorithm.AES -> "AES"
+                    Algorithm.HMAC -> "HmacSHA256"
+                    else -> throw android.os.ServiceSpecificException(
+                        SECURE_HW_COMMUNICATION_FAILED,
+                        "Unsupported symmetric algorithm: ${parsedParams.algorithm}",
+                    )
+                }
+            val keyGen = javax.crypto.KeyGenerator.getInstance(algoName)
+            keyGen.init(parsedParams.keySize)
+            val secretKey = keyGen.generateKey()
+
+            val metadata = KeyMetadata().apply {
+                keySecurityLevel = securityLevel
+                key = KeyDescriptor().apply {
+                    domain = Domain.KEY_ID
+                    nspace = keyDescriptor.nspace
+                    alias = null
+                    blob = null
+                }
+                certificate = null
+                certificateChain = null
+                authorizations = parsedParams.toAuthorizations(callingUid, securityLevel)
+                modificationTimeMs = System.currentTimeMillis()
+            }
+            val response = KeyEntryResponse().apply {
+                this.metadata = metadata
+                iSecurityLevel = original
+            }
+            generatedKeys[keyId] =
+                GeneratedKeyInfo(null, secretKey, keyDescriptor.nspace, response, parsedParams)
+            return InterceptorUtils.createTypedObjectReply(metadata)
+        }
+
         val keyData =
             CertificateGenerator.generateAttestedKeyPair(
                 callingUid,
@@ -509,12 +557,10 @@ class KeyMintSecurityLevelInterceptor(
                 securityLevel,
             ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
-        val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-        cleanupKeyData(keyId)
         val response =
             buildKeyEntryResponse(callingUid, keyData.second, parsedParams, keyDescriptor)
         generatedKeys[keyId] =
-            GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response, parsedParams)
+            GeneratedKeyInfo(keyData.first, null, keyDescriptor.nspace, response, parsedParams)
         if (isAttestKeyRequest) attestationKeys.add(keyId)
 
         return InterceptorUtils.createTypedObjectReply(response.metadata)

@@ -260,9 +260,69 @@ object AttestationBuilder {
             )
         }
 
+        val attestVersion = AndroidDeviceUtils.getAttestVersion(securityLevel)
+
+        if (params.rsaOaepMgfDigest.isNotEmpty() && attestVersion >= 100) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_RSA_OAEP_MGF_DIGEST,
+                    DERSet(
+                        params.rsaOaepMgfDigest.map { ASN1Integer(it.toLong()) }.toTypedArray()
+                    ),
+                )
+            )
+        }
+
+        if (params.rollbackResistance == true && attestVersion >= 3) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ROLLBACK_RESISTANCE,
+                    DERNull.INSTANCE,
+                )
+            )
+        }
+
+        if (params.earlyBootOnly == true && attestVersion >= 4) {
+            list.add(
+                DERTaggedObject(true, AttestationConstants.TAG_EARLY_BOOT_ONLY, DERNull.INSTANCE)
+            )
+        }
+
         if (params.noAuthRequired == true) {
             list.add(
                 DERTaggedObject(true, AttestationConstants.TAG_NO_AUTH_REQUIRED, DERNull.INSTANCE)
+            )
+        }
+
+        if (params.allowWhileOnBody == true) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ALLOW_WHILE_ON_BODY,
+                    DERNull.INSTANCE,
+                )
+            )
+        }
+
+        if (params.trustedUserPresenceRequired == true && attestVersion >= 3) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_TRUSTED_USER_PRESENCE_REQUIRED,
+                    DERNull.INSTANCE,
+                )
+            )
+        }
+
+        if (params.trustedConfirmationRequired == true && attestVersion >= 3) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_TRUSTED_CONFIRMATION_REQUIRED,
+                    DERNull.INSTANCE,
+                )
             )
         }
 
@@ -368,12 +428,6 @@ object AttestationBuilder {
                     )
                 )
             }
-        }
-        // Add enforcement-related tags that are reflected in the attestation.
-        if (params.callerNonce == true) {
-            list.add(
-                DERTaggedObject(true, AttestationConstants.TAG_CALLER_NONCE, DERNull.INSTANCE)
-            )
         }
         return DERSequence(list.sortedBy { (it as DERTaggedObject).tagNo }.toTypedArray())
     }

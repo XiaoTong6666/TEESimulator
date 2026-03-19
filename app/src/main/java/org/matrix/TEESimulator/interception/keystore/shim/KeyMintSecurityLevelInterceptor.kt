@@ -823,6 +823,9 @@ private fun KeyMintAttestation.toAuthorizations(
     }
 
     this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
+    this.blockMode.forEach {
+        authList.add(createAuth(Tag.BLOCK_MODE, KeyParameterValue.blockMode(it)))
+    }
     this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
     this.padding.forEach {
         authList.add(createAuth(Tag.PADDING, KeyParameterValue.paddingMode(it)))

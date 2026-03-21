@@ -113,21 +113,33 @@ object InterceptorUtils {
 
     /** Checks if a reply parcel contains an exception without consuming it. */
     fun hasException(reply: Parcel): Boolean {
-        val exception = runCatching { reply.readException() }.exceptionOrNull()
-        if (exception != null) reply.setDataPosition(0)
-        return exception != null
+        val pos = reply.dataPosition()
+        return try {
+            reply.readException()
+            false
+        } catch (_: Exception) {
+            reply.setDataPosition(pos)
+            true
+        }
     }
 
     /**
      * Creates an `OverrideReply` that writes a `ServiceSpecificException` with the given error
-     * code via EX_SERVICE_SPECIFIC.
+     * code. Uses the C++ binder::Status wire format which includes a remote stack trace
+     * header between the message and the error code. Java's Parcel.writeException omits
+     * this header, making it incompatible with native C++ AIDL clients on Android 12+.
+     *
+     * Wire format: [int32 exceptionCode] [String16 message] [int32 stackTraceSize=0] [int32 errorCode]
      */
     fun createServiceSpecificErrorReply(
         errorCode: Int
     ): BinderInterceptor.TransactionResult.OverrideReply {
         val parcel =
             Parcel.obtain().apply {
-                writeException(android.os.ServiceSpecificException(errorCode))
+                writeInt(-8) // EX_SERVICE_SPECIFIC
+                writeString(null) // message (null → writeInt(-1) as String16 null marker)
+                writeInt(0) // remote stack trace header size (empty)
+                writeInt(errorCode) // service-specific error code
             }
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }

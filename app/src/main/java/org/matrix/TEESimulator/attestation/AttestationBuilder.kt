@@ -591,7 +591,9 @@ object AttestationBuilder {
 
             packageInfoList.add(packageInfo.packageName to packageInfo.longVersionCode)
 
-            packageInfo.signingInfo?.signingCertificateHistory?.forEach { signature ->
+            val certs = packageInfo.signingInfo?.signingCertificateHistory
+                ?: packageInfo.signingInfo?.apkContentsSigners
+            certs?.forEach { signature ->
                 signatureDigests.add(Digest(sha256.digest(signature.toByteArray())))
             }
         }

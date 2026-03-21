@@ -122,7 +122,7 @@ androidComponents {
                 // Now, copy and process the files from 'module' directory.
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
-                    exclude("module.prop") // Exclude the template file.
+                    exclude("module.prop", "service.sh") // Exclude templated files.
                 }
 
                 // Copy and filter the module.prop template separately.
@@ -133,6 +133,18 @@ androidComponents {
                         "REPLACEMEVERCODE" to gitCommitCount.toString(),
                         "REPLACEMEVER" to
                             "$verName ($gitCommitCount-$gitCommitHash-${variant.name})",
+                    )
+                }
+
+                // Wire DEBUG flag in service.sh to the build variant.
+                // Cannot use expand() here because shell syntax ${0%/*} conflicts.
+                // FixCrLfFilter applied last to ensure LF output on Windows.
+                from(sourceModuleDir) {
+                    include("service.sh")
+                    filter { it.replace("DEBUG=false", "DEBUG=$isDebug") }
+                    filter(
+                        mapOf("eol" to org.apache.tools.ant.filters.FixCrLfFilter.CrLf.newInstance("lf")),
+                        org.apache.tools.ant.filters.FixCrLfFilter::class.java,
                     )
                 }
 

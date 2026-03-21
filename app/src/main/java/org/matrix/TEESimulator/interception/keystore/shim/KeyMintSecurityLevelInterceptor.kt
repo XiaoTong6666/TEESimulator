@@ -15,6 +15,8 @@ import java.security.SecureRandom
 import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import org.matrix.TEESimulator.attestation.ATTESTATION_OID
+import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -102,8 +104,15 @@ class KeyMintSecurityLevelInterceptor(
         resultCode: Int,
     ): TransactionResult {
         // We only care about successful transactions.
-        if (resultCode != 0 || reply == null || InterceptorUtils.hasException(reply))
+        if (resultCode != 0 || reply == null || InterceptorUtils.hasException(reply)) {
+            val reason = when {
+                resultCode != 0 -> "binder error (resultCode=$resultCode)"
+                reply != null && InterceptorUtils.hasException(reply) -> "service exception in reply"
+                else -> "null reply"
+            }
+            SystemLogger.debug("[TX_ID: $txId] post-${transactionNames[code] ?: code}: skipped ($reason)")
             return TransactionResult.SkipTransaction
+        }
 
         if (code == IMPORT_KEY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
@@ -115,24 +124,6 @@ class KeyMintSecurityLevelInterceptor(
             val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
             cleanupKeyData(keyId)
             importedKeys.add(keyId)
-
-            // Patch imported key certificates the same way as generated keys.
-            if (!ConfigurationManager.shouldSkipUid(callingUid)) {
-                val metadata: KeyMetadata =
-                    reply.readTypedObject(KeyMetadata.CREATOR)
-                        ?: return TransactionResult.SkipTransaction
-                val originalChain = CertificateHelper.getCertificateChain(metadata)
-                if (originalChain != null && originalChain.size > 1) {
-                    val newChain =
-                        AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-                    CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
-                    metadata.authorizations =
-                        InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
-                    patchedChains[keyId] = newChain
-                    SystemLogger.debug("Cached patched certificate chain for imported key $keyId.")
-                    return InterceptorUtils.createTypedObjectReply(metadata)
-                }
-            }
         } else if (code == CREATE_OPERATION_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
@@ -345,13 +336,19 @@ class KeyMintSecurityLevelInterceptor(
                 // Use key params for crypto properties (algorithm, digest, etc.) but
                 // override purpose from the operation params.
                 val effectiveParams =
-                    keyParams.copy(purpose = parsedOpParams.purpose, digest = parsedOpParams.digest.ifEmpty { keyParams.digest })
+                    keyParams.copy(
+                        purpose = parsedOpParams.purpose,
+                        digest = parsedOpParams.digest.ifEmpty { keyParams.digest },
+                        blockMode = parsedOpParams.blockMode.ifEmpty { keyParams.blockMode },
+                        padding = parsedOpParams.padding.ifEmpty { keyParams.padding },
+                    )
                 val softwareOperation =
                     SoftwareOperation(
                         txId,
                         generatedKeyInfo.keyPair,
                         generatedKeyInfo.secretKey,
                         effectiveParams,
+                        opParams,
                     )
 
                 // Decrement usage counter on finish; delete key when exhausted.
@@ -421,6 +418,7 @@ class KeyMintSecurityLevelInterceptor(
                     params.any {
                         it.tag == Tag.ATTESTATION_ID_SERIAL ||
                             it.tag == Tag.ATTESTATION_ID_IMEI ||
+                            it.tag == Tag.ATTESTATION_ID_SECOND_IMEI ||
                             it.tag == Tag.ATTESTATION_ID_MEID ||
                             it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
                     }
@@ -469,18 +467,30 @@ class KeyMintSecurityLevelInterceptor(
                 val isAuto = ConfigurationManager.isAutoMode(callingUid)
 
                 when {
-                    forceGenerate -> doSoftwareGeneration(
-                        callingUid, keyDescriptor, attestationKey, parsedParams, isAttestKeyRequest
-                    )
-                    isAuto && !teeFunctional -> raceTeePatch(
-                        callingUid, keyDescriptor, attestationKey, params, parsedParams, isAttestKeyRequest
-                    )
-                    parsedParams.attestationChallenge != null -> TransactionResult.Continue
-                    else -> TransactionResult.ContinueAndSkipPost
+                    forceGenerate -> {
+                        SystemLogger.debug("generateKey ${keyDescriptor.alias}: mode=GENERATE")
+                        doSoftwareGeneration(
+                            callingUid, keyDescriptor, attestationKey, parsedParams, isAttestKeyRequest
+                        )
+                    }
+                    isAuto && !teeFunctional -> {
+                        SystemLogger.debug("generateKey ${keyDescriptor.alias}: mode=AUTO (racing)")
+                        raceTeePatch(
+                            callingUid, keyDescriptor, attestationKey, params, parsedParams, isAttestKeyRequest
+                        )
+                    }
+                    parsedParams.attestationChallenge != null -> {
+                        SystemLogger.debug("generateKey ${keyDescriptor.alias}: mode=PATCH (forwarding to TEE)")
+                        TransactionResult.Continue
+                    }
+                    else -> {
+                        SystemLogger.debug("generateKey ${keyDescriptor.alias}: no challenge, passthrough")
+                        TransactionResult.ContinueAndSkipPost
+                    }
                 }
             }
             .getOrElse { e ->
-                SystemLogger.error("No key pair generated for UID $callingUid.", e)
+                SystemLogger.error("generateKey failed for UID $callingUid: ${e.javaClass.simpleName}", e)
                 val code =
                     if (e is android.os.ServiceSpecificException) e.errorCode
                     else SECURE_HW_COMMUNICATION_FAILED
@@ -565,6 +575,10 @@ class KeyMintSecurityLevelInterceptor(
         TeeLatencySimulator.simulateGenerateKeyDelay(
             parsedParams.algorithm, System.nanoTime() - genStartNanos
         )
+        val elapsedMs = (System.nanoTime() - genStartNanos) / 1_000_000.0
+        SystemLogger.debug(
+            "doSoftwareGeneration ${keyDescriptor.alias}: completed in %.1fms (chain=${keyData.second.size} certs, nspace=${keyDescriptor.nspace})".format(elapsedMs)
+        )
         return InterceptorUtils.createTypedObjectReply(response.metadata)
     }
 
@@ -619,18 +633,39 @@ class KeyMintSecurityLevelInterceptor(
         return try {
             val teeMetadata = threadA.join()
             threadB.cancel(true)
-            teeFunctional = true
-            SystemLogger.info("AUTO: TEE succeeded for ${keyDescriptor.alias}, marked functional.")
 
             val originalChain = CertificateHelper.getCertificateChain(teeMetadata)
-            if (originalChain != null && originalChain.size > 1) {
-                val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-                CertificateHelper.updateCertificateChain(teeMetadata, newChain).getOrThrow()
-                teeMetadata.authorizations =
-                    InterceptorUtils.patchAuthorizations(teeMetadata.authorizations, callingUid)
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                cleanupKeyData(keyId)
-                patchedChains[keyId] = newChain
+
+            // Verify TEE attestation: the leaf cert must contain the attestation
+            // extension with the exact challenge we requested. Only then is the TEE
+            // proven capable of attestation and the chain can be patched.
+            if (parsedParams.attestationChallenge != null &&
+                originalChain != null && originalChain.size > 1
+            ) {
+                val verified = runCatching {
+                    val leaf = org.bouncycastle.cert.X509CertificateHolder(originalChain[0].encoded)
+                    val ext = leaf.getExtension(ATTESTATION_OID)
+                    if (ext != null) {
+                        val seq = org.bouncycastle.asn1.ASN1Sequence.getInstance(ext.extnValue.octets)
+                        val challenge = (seq.getObjectAt(
+                            AttestationConstants.KEY_DESCRIPTION_ATTESTATION_CHALLENGE_INDEX
+                        ) as org.bouncycastle.asn1.ASN1OctetString).octets
+                        challenge.contentEquals(parsedParams.attestationChallenge)
+                    } else false
+                }.getOrDefault(false)
+
+                if (verified) {
+                    teeFunctional = true
+                    SystemLogger.info("AUTO: TEE attestation verified for ${keyDescriptor.alias}, marked functional.")
+
+                    val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                    CertificateHelper.updateCertificateChain(teeMetadata, newChain).getOrThrow()
+                    teeMetadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(teeMetadata.authorizations, callingUid)
+                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                    cleanupKeyData(keyId)
+                    patchedChains[keyId] = newChain
+                }
             }
 
             // Cache the patched response for getKeyEntry. Stored in teeResponses

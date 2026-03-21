@@ -73,6 +73,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 LIST_ENTRIES_BATCHED_TRANSACTION,
                 GET_NUMBER_OF_ENTRIES_TRANSACTION,
             )
+            .filter { it != -1 } // Exclude methods unavailable on this Android version
             .toIntArray()
     }
 
@@ -151,7 +152,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         ) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-            if (ConfigurationManager.shouldSkipUid(callingUid))
+            val skipUid = ConfigurationManager.shouldSkipUid(callingUid)
+
+            if (skipUid && code == UPDATE_SUBCOMPONENT_TRANSACTION)
                 return TransactionResult.ContinueAndSkipPost
 
             if (code == UPDATE_SUBCOMPONENT_TRANSACTION)
@@ -196,9 +199,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             }
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
 
+            // Always return software-generated keys from cache, even if UID
+            // config changed after generation. Without this, a config reload
+            // mid-session orphans keys that only exist in memory.
             val response =
                 KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId)
-                    ?: return TransactionResult.Continue
+            if (response == null) {
+                val action = if (skipUid) "passthrough (skipped UID)" else "forwarding to hardware"
+                SystemLogger.debug("[TX_ID: $txId] getKeyEntry ${descriptor.alias}: cache miss, $action")
+                return if (skipUid) TransactionResult.ContinueAndSkipPost
+                else TransactionResult.Continue
+            }
 
             if (KeyMintSecurityLevelInterceptor.isAttestationKey(keyId))
                 SystemLogger.info("${descriptor.alias} was an attestation key")
@@ -233,8 +244,14 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): TransactionResult {
-        if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
+        if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply)) {
+            if (reply != null && InterceptorUtils.hasException(reply)) {
+                SystemLogger.debug(
+                    "[TX_ID: $txId] post-${transactionNames[code] ?: code}: hardware returned exception, forwarding as-is"
+                )
+            }
             return TransactionResult.SkipTransaction
+        }
 
         if (code == GET_NUMBER_OF_ENTRIES_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
@@ -302,6 +319,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         KeyMintAttestation(
                             authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
                         )
+
+                    if (parsedParameters.isImportKey()) {
+                        SystemLogger.info("[TX_ID: $txId] Skip patching for imported keys.")
+                        return TransactionResult.SkipTransaction
+                    }
 
                     if (parsedParameters.isAttestKey() &&
                         !KeyMintSecurityLevelInterceptor.importedKeys.contains(keyId)

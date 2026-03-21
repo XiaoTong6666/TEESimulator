@@ -99,6 +99,7 @@ private object JcaAlgorithmMapper {
             when (params.blockMode.firstOrNull()) {
                 BlockMode.ECB -> "ECB"
                 BlockMode.CBC -> "CBC"
+                BlockMode.CTR -> "CTR"
                 BlockMode.GCM -> "GCM"
                 else -> "ECB" // Default for RSA
             }
@@ -178,10 +179,39 @@ private class CipherPrimitive(
     cryptoKey: java.security.Key,
     params: KeyMintAttestation,
     private val opMode: Int,
+    nonce: ByteArray?,
+    macLength: Int?,
 ) : CryptoPrimitive {
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
-            init(opMode, cryptoKey)
+            val algSpec = when {
+                nonce != null && params.blockMode.contains(BlockMode.GCM) ->
+                    javax.crypto.spec.GCMParameterSpec((macLength ?: 128), nonce)
+                params.padding.contains(PaddingMode.RSA_OAEP) -> {
+                    val mgfDigest = when (params.rsaOaepMgfDigest.firstOrNull()) {
+                        Digest.SHA_2_256 -> "SHA-256"
+                        Digest.SHA_2_384 -> "SHA-384"
+                        Digest.SHA_2_512 -> "SHA-512"
+                        else -> "SHA-1"
+                    }
+                    val mainDigest = when (params.digest.firstOrNull()) {
+                        Digest.SHA_2_256 -> "SHA-256"
+                        Digest.SHA_2_384 -> "SHA-384"
+                        Digest.SHA_2_512 -> "SHA-512"
+                        else -> "SHA-1"
+                    }
+                    javax.crypto.spec.OAEPParameterSpec(
+                        mainDigest,
+                        "MGF1",
+                        java.security.spec.MGF1ParameterSpec(mgfDigest),
+                        javax.crypto.spec.PSource.PSpecified.DEFAULT,
+                    )
+                }
+                nonce != null ->
+                    javax.crypto.spec.IvParameterSpec(nonce)
+                else -> null
+            }
+            if (algSpec != null) init(opMode, cryptoKey, algSpec) else init(opMode, cryptoKey)
         }
 
     override fun updateAad(data: ByteArray?) {
@@ -191,8 +221,13 @@ private class CipherPrimitive(
     override fun update(data: ByteArray?): ByteArray? =
         if (data != null) cipher.update(data) else null
 
-    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? =
-        if (data != null) cipher.doFinal(data) else cipher.doFinal()
+    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        return try {
+            if (data != null) cipher.doFinal(data) else cipher.doFinal()
+        } catch (e: javax.crypto.AEADBadTagException) {
+            throw ServiceSpecificException(KeystoreErrorCode.VERIFICATION_FAILED, "GCM tag verification failed")
+        }
+    }
 
     override fun abort() {}
 
@@ -247,6 +282,7 @@ class SoftwareOperation(
     keyPair: KeyPair?,
     secretKey: javax.crypto.SecretKey?,
     params: KeyMintAttestation,
+    opParams: Array<KeyParameter> = emptyArray(),
     var onFinishCallback: (() -> Unit)? = null,
 ) {
     private val primitive: CryptoPrimitive
@@ -264,11 +300,15 @@ class SoftwareOperation(
                 KeyPurpose.VERIFY -> Verifier(keyPair!!, params)
                 KeyPurpose.ENCRYPT -> {
                     val key: java.security.Key = secretKey ?: keyPair!!.public
-                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE)
+                    val nonce = opParams.find { it.tag == Tag.NONCE }?.value?.blob
+                    val macLen = opParams.find { it.tag == Tag.MAC_LENGTH }?.value?.integer
+                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE, nonce, macLen)
                 }
                 KeyPurpose.DECRYPT -> {
                     val key: java.security.Key = secretKey ?: keyPair!!.private
-                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
+                    val nonce = opParams.find { it.tag == Tag.NONCE }?.value?.blob
+                    val macLen = opParams.find { it.tag == Tag.MAC_LENGTH }?.value?.integer
+                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE, nonce, macLen)
                 }
                 KeyPurpose.AGREE_KEY -> KeyAgreementPrimitive(keyPair!!)
                 else ->
@@ -328,7 +368,11 @@ class SoftwareOperation(
         try {
             val result = primitive.finish(data, signature)
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
-            onFinishCallback?.invoke()
+            try {
+                onFinishCallback?.invoke()
+            } catch (e: Exception) {
+                SystemLogger.error("[SoftwareOp TX_ID: $txId] onFinishCallback failed.", e)
+            }
             return result
         } catch (e: ServiceSpecificException) {
             throw e
